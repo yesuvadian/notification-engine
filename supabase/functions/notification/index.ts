@@ -9,6 +9,7 @@ import {
 } from './http.ts';
 import { runWorker } from './worker.ts';
 import { PROVIDERS } from './adapters/index.ts';
+import { allowedProviderUrl } from './adapters/http_generic.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -278,6 +279,13 @@ function validateProviderConfig(channel: string, cfg: unknown): Body | undefined
   if (!PROVIDERS[channel as keyof typeof PROVIDERS]?.includes(provider)) throw new ApiError(422, 'invalid_request', `Unsupported provider ${provider} for ${channel}`);
   for (const k of Object.keys(c)) {
     if (k !== 'secret_name' && SECRETISH.test(k)) throw new ApiError(422, 'invalid_request', `Put credentials in Vault and reference them with secret_name, not ${k}`);
+  }
+  if (provider === 'http') {
+    if (typeof c.url !== 'string') throw new ApiError(422, 'invalid_request', 'http provider needs url');
+    if (!c.url.includes('{{')) {
+      try { allowedProviderUrl(c.url); } catch (e) { throw new ApiError(422, 'invalid_request', (e as Error).message); }
+    }
+    if (c.headers !== undefined && (typeof c.headers !== 'object' || Array.isArray(c.headers))) throw new ApiError(422, 'invalid_request', 'headers must be an object');
   }
   return { ...c, provider };
 }

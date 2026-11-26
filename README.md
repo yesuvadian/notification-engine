@@ -22,7 +22,7 @@ Spec table names map to the physical tables like this: tables keep their `ntf.nt
 
 ## Upgrade the shared DEV project (owefydcgkvpwvllsbhcx)
 
-Migrations `20260101000001`–`03` are already applied. Apply `20261126000001`–`04` in order. The new files are additive and safe to re-run. Don't reset the database.
+Migrations `20260101000001`–`03` are already applied. Apply `20261126000001`–`05` in order. The new files are additive and safe to re-run. Don't reset the database.
 
 1. **Enable extensions** under Dashboard → Database → Extensions: `pgmq`, `pg_cron` and `pg_net` (Vault is on by default). Migration 2 also tries to create them.
 2. **Apply the migrations in order.** Either paste each file into the SQL Editor, or run:
@@ -74,18 +74,44 @@ Templates and rules are configured through the admin APIs.
 
 In Flutter, create `NotificationApi(productCode: 'cmm', accessToken: () => supabase session JWT, organizationId: ...)`. See `flutter_sdk/README.md`.
 
-## Channel providers
+## Channel providers (SMS, WhatsApp, push)
 
-Store the credentials JSON as a Vault secret with a scoped name: `ntf_t_<tenant uuid without dashes>_*`, `ntf_p_<product code>_*` or `ntf_shared_*`. Then save the channel through `POST /v1/admin/channels`:
+The provider is pure configuration, so each client can use its own. The worker uses the organization's `ntf_channels.provider_config` when it names a `provider`. Otherwise it falls back to the product default in `ntf_product_channel_defaults.provider_config`. Credentials always live in a Vault secret referenced by `secret_name`, which must be scoped `ntf_p_<product code>_*` (product), `ntf_t_<tenant uuid without dashes>_*` (one organization) or `ntf_shared_*`.
 
-| Channel | provider_config | Vault secret JSON | Template content |
-|---|---|---|---|
-| SMS | `{"provider":"twilio","from":"+1…" or "messaging_service_sid":"MG…","secret_name":"…"}` | `{"account_sid","auth_token"}` | `body` (or `sms_body`) |
-| SMS | `{"provider":"msg91","template_id":"…","secret_name":"…"}` | `{"authkey"}` | `msg91_template_id`, `params: {"VAR1":"{{data.x}}"}` |
-| WHATSAPP | `{"provider":"meta","phone_number_id":"…","secret_name":"…"}` | `{"access_token"}` | `template_name`, `language`, `params: ["{{data.x}}"]` |
-| PUSH | `{"provider":"fcm","secret_name":"…"}` | Firebase service-account JSON | `title`, `body`, `data` |
+| provider | Channels | provider_config | Vault secret JSON | Template content |
+|---|---|---|---|---|
+| `http` (any provider) | SMS, WHATSAPP | `url` (https), `method`, `content_type` (json/form), `headers`, `body`, `message_id_path`, `success_path` + `success_values`, `secret_name` | any keys, used as `{{secret.key}}` | anything the body template uses |
+| `twilio` | SMS | `from` or `messaging_service_sid`, `secret_name` | `{"account_sid","auth_token"}` | `body` (or `sms_body`) |
+| `msg91` | SMS | `template_id`, `secret_name` | `{"authkey"}` | `msg91_template_id`, `params: {"VAR1":"{{data.x}}"}` |
+| `meta` | WHATSAPP | `phone_number_id`, `secret_name` | `{"access_token"}` | `template_name`, `language`, `params: ["{{data.x}}"]` |
+| `fcm` | PUSH | `secret_name` | Firebase service-account JSON | `title`, `body`, `data` |
 
-External channels need the user's consent (`POST /v1/preferences`, or device registration for push) and an E.164 phone number from user sync.
+Variables in the `http` url, headers and body: `{{to}}` (E.164), `{{to_digits}}`, `{{body}}`, `{{title}}`, `{{template_name}}`, `{{language}}`, `{{params.x}}` / `{{params[0]}}`, `{{delivery_id}}`, `{{user_id}}` and `{{secret.<key>}}`. Event data reaches the provider through the channel template (for example `params`). The URL must be https and public. Set `NTF_HTTP_PROVIDER_ALLOWED_HOSTS` on the function to restrict hosts further.
+
+**Example: one SMS provider for every CMM organization**
+```sql
+select vault.create_secret('{"api_key":"<key from the provider>"}', 'ntf_p_cmm_sms');
+update ntf.ntf_product_channel_defaults set provider_config = '{
+  "provider": "http",
+  "url": "https://api.your-sms-provider.com/v1/send",
+  "headers": {"Authorization": "Bearer {{secret.api_key}}"},
+  "body": {"to": "{{to_digits}}", "message": "{{body}}", "sender": "ASTUTE"},
+  "message_id_path": "data.id",
+  "secret_name": "ntf_p_cmm_sms"
+}'::jsonb
+where channel = 'SMS' and product_id = (select id from ntf.ntf_products where code = 'cmm');
+```
+An organization with its own provider sends `POST /v1/admin/channels` with its own `provider_config` and an `ntf_t_<tenant>_*` secret.
+
+**Everything needed before an SMS or WhatsApp message goes out**
+1. A provider account with a sender ID or number and API credentials. India SMS needs DLT-registered templates and a header. WhatsApp needs a verified business number and approved templates.
+2. A Vault secret with the credentials (above).
+3. Provider config: the product default, or an organization override.
+4. The channel enabled for the organization (`POST /v1/admin/channels {"channel":"SMS","enabled":true}`, or `ntf_assign_org(..., '{"sms": true}')`). Channels are off by default.
+5. A published template version for the channel, and a rule binding (`POST /v1/admin/rule-channels`). WhatsApp template names and parameter counts must match the approved template.
+6. Users synced with E.164 `phone`.
+7. Consent per user and channel: `"consents": {"SMS": true}` in `/v1/users/sync` from the backend, or `POST /v1/preferences` from the app. Without consent, deliveries are not created.
+8. Check results in `/v1/admin/deliveries` and `/v1/admin/attempts`. `SENT` means the provider accepted the message. Delivery receipts (webhooks) are not implemented yet.
 
 ## Local development
 

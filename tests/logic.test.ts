@@ -40,3 +40,11 @@ Deno.test('http helpers', () => {
   assert(safeEqual('abc', 'abc') && !safeEqual('abc', 'abd') && !safeEqual('abc', 'abcd'));
   assertEquals(normalizePath('https://x.supabase.co/functions/v1/notification/v1/health/'), '/v1/health');
 });
+
+Deno.test('generic http provider url guard', async () => {
+  const { allowedProviderUrl } = await import('../supabase/functions/notification/adapters/http_generic.ts');
+  assertEquals(allowedProviderUrl('https://api.sms.example.com/send').hostname, 'api.sms.example.com');
+  for (const u of ['http://api.example.com', 'https://localhost/', 'https://169.254.169.254/', 'https://10.1.2.3/', 'https://192.168.1.1/', 'https://[::1]/']) {
+    assertThrows(() => allowedProviderUrl(u));
+  }
+});

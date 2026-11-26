@@ -202,7 +202,8 @@ async function deliver(msg: QueueMsg, stats: WorkerStats) {
   }
 
   await q(db.from('ntf_deliveries').update({ status: 'PROCESSING', updated_at: new Date().toISOString() }).eq('id', d.id));
-  const config = (ch?.provider_config ?? {}) as Row;
+  // Organization override when it names a provider, otherwise the product default (ntf_effective_channel_config).
+  const config = ((await q(db.rpc('ntf_effective_channel_config', { p_tenant: d.tenant_id, p_channel: d.channel }))) ?? {}) as Row;
   let result: SendResult;
   let provider = String(config.provider ?? 'mock');
   try {
