@@ -954,3 +954,146 @@ Backend independence is the requested architecture direction. Python/TypeScript 
 All 21 engine tables use `ntf.ntf_*`; all four engine RPCs and explicit indexes use `ntf_`. Product tables are not referenced or altered. Keep the dedicated `ntf` schema; expose it in Supabase Data API settings alongside existing schemas, not instead of them. Only service_role has schema access; browser clients use the Edge Function.
 For a fresh installation, run the three migrations in order in SQL Editor. Do not reset the shared database. The existing `notification` schema is left untouched. This is a fresh installation into `ntf`, not a data migration. If `ntf` already exists, inspect it before running migrations. Do not drop the old schema or product tables.
 For cloud DEV use `supabase/seed_cloud_dev.sql` optionally, once, instead of `seed.sql`. It returns random short-lived demo tokens; save them securely. Set WORKER_TOKEN in Edge Function secrets to the returned worker token. Deploy notification function with JWT gateway verification disabled (the function validates its own opaque tokens); never expose service role key. Use NOTIFICATION_BASE_URL (ending /v1), NOTIFICATION_SERVICE_TOKEN, NOTIFICATION_WORKER_TOKEN and NOTIFICATION_USER_TOKEN for smoke.py. Keep this demo restricted to DEV. Existing production limitations still apply.
+
+
+## 46. DEV deployment and verification update — 26 November 2026
+
+This section supersedes historical implementation-status statements, not the target architecture. The shared DEV installation is running in Supabase project `owefydcgkvpwvllsbhcx`, Edge Function `notification`, schema `ntf`. Existing product tables and the old `notification` schema remain outside this deployment. Do not reset the shared database or rerun the cloud seed against existing rows.
+
+### Observed results
+
+| Check | Status |
+|---|---|
+| Flutter Chrome connection and initial unread-count request | Passed in user environment |
+| Admin authentication and template retrieval | Passed in user environment |
+| Inbox and bell UI | Loaded; inbox empty |
+| Admin modules | Visible: templates, events, roles, rules, channels, overrides, deliveries, audit |
+| Dynamic rendering, event publishing, worker, mark-as-read | Pending end-to-end verification |
+| Git-based SDK installation and CI | Pending |
+| Cross-tenant isolation, production security and real external delivery | Pending |
+
+The published IN_APP template has ID `40000000-0000-0000-0000-000000000001`, version 1, locale `en`, title `Purchase update`, and body `Hello {{recipient.name}}, record {{data.reference}} was updated.`
+
+### Resolved deployment issues
+
+- Gateway 401 invalid JWT: disable legacy JWT verification for this function only; retain custom scoped opaque-token authentication.
+- Invalid schema: expose `ntf` alongside existing Data API schemas; retain service-role access and avoid direct browser database access.
+- Custom authentication 401: fresh short-lived scoped tokens were generated.
+- HTTP 404 `not found or forbidden`: runtime logs confirmed correct normalized path `/v1/notifications/unread-count` but scope `admin`. Re-entering freshly generated user/admin tokens resolved the connection. The exact original copying mistake was not independently established. Do not weaken scope checks.
+- The deployed function was updated with path normalization and routing/authentication diagnostics. The archived function predates that edit; export/reconcile the deployed source before treating Git as authoritative. Never log raw tokens. Consider separate 403 and 404 responses in a future API revision.
+
+## 47. Private GitHub repository and SDK integration
+
+Proposed initial layout: one private monorepo, using the contents of the `platform/` directory from `notification_platform_ntf_schema.zip` as repository root and adding `flutter_demo/` from `notification_flutter_demo.zip`. Both archives were inspected; the actual GitHub repository has not yet been created or verified. The actual SDK package name is `notification_sdk`, version `0.1.0`.
+
+```text
+notification-engine/
+  supabase/
+    migrations/
+    functions/notification/
+    seed_cloud_dev.sql
+  flutter_sdk/
+    pubspec.yaml
+    lib/
+    test/
+  flutter_demo/
+    pubspec.yaml
+    lib/
+    assets/
+    web/
+  python_sdk/
+  typescript_sdk/
+  tests/
+  notification_engine.md
+  README.md
+  .gitignore
+```
+
+### 47.1 Prepare and push
+
+Create an empty private repository on GitHub. In a new working folder, merge the archives as described above, replace the archived Edge Function source with the actual deployed revision, and review the files before committing. Keep the SDK from the ntf platform archive; do not accidentally replace it with an older starter package. Use GitHub SSH authentication or an approved credential manager. Verify SSH access with `ssh -T git@github.com` (GitHub may return a nonzero exit code even when authentication succeeds).
+
+Suggested `.gitignore` additions (review existing rules):
+
+```gitignore
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+supabase/.temp/
+```
+
+Review staged files for credentials, including config.json, seed output, logs and test fixtures. A publishable key is not a service-role secret, but use a sanitized example configuration for the repository where practical. The current SDK does not use the anon key for custom token authentication. Never commit live user/admin/service/worker tokens, provider secrets or service-role keys. Local-only seed credentials must never be used in hosted DEV or production.
+
+```powershell
+git init -b main
+git add .
+git diff --cached --stat
+git diff --cached
+git commit -m "Initial notification engine DEV baseline"
+git remote add origin git@github.com:YOUR_ORG/notification-engine.git
+git push -u origin main
+```
+
+Replace YOUR_ORG and repository name with real values. If the repository already exists, clone it and merge changes instead of overwriting history. No Git push or cloud deployment has been performed by this document update.
+
+### 47.2 Consume the SDK from GitHub
+
+In `flutter_demo/pubspec.yaml`, replace only the local `notification_sdk: path: ../flutter_sdk` dependency with:
+
+```yaml
+dependencies:
+  flutter:
+    sdk: flutter
+  notification_sdk:
+    git:
+      url: git@github.com:YOUR_ORG/notification-engine.git
+      ref: main
+      path: flutter_sdk
+```
+
+Preserve the existing environment, assets and other settings. If the repository retains an outer `platform/` folder, use `path: platform/flutter_sdk` instead. For an independent consumption test, clone the repo into a fresh folder or use a separate Flutter host app. Ensure no dependency override points back to the local SDK.
+
+```powershell
+cd flutter_demo
+flutter clean
+flutter pub get
+flutter pub deps
+flutter run -d chrome
+```
+
+Inspect `pubspec.lock`: `notification_sdk` must have `source: git`, the expected URL/path, and a resolved commit. Commit the application lockfile for reproducibility. After validating the SDK, tag the tested commit (for example `v0.1.0`) and use that tag or a commit SHA in consuming products instead of a moving branch. Do not claim the tag exists until it is pushed.
+
+### 47.3 Connect and verify
+
+Use project reference `owefydcgkvpwvllsbhcx` (not a full URL), organization ID `20000000-0000-0000-0000-000000000001`, product code `product_a`, and fresh user/admin tokens from the isolated demo tenant. User token belongs in DEV user token; admin token belongs in DEV admin token. Tokens expire after 24 hours under the current seed policy. Never place service or worker tokens in Flutter. The app uses separate NotificationApi instances and tests user unread count and admin templates before opening.
+
+Acceptance: dependency resolves from Git, app connects, inbox loads, bell appears, and Super Admin → templates → Load returns the published template. Check the browser network and Edge Function logs if a request fails. These Git-specific checks remain unexecuted.
+
+## 48. End-to-end cloud DEV test after Git integration
+
+The inspected cloud seed defines event `APPROVED`, version 1, trigger `WORKFLOW_TRANSITION`, required string `reference`, recipient role `manager` assigned to `u1`, and an active IN_APP rule. First verify events, roles, rules and channels using the admin Load action. Do not change the seed configuration unnecessarily.
+
+From a separate PowerShell terminal, use current service and worker tokens (worker must match the hosted WORKER_TOKEN secret). The following follows the packaged demo README. Use PowerShell 7 for masked input; do not paste tokens into scripts or commit them.
+
+```powershell
+$base = 'https://owefydcgkvpwvllsbhcx.supabase.co/functions/v1/notification/v1'
+$service = Read-Host 'Service token' -MaskInput
+$worker = Read-Host 'Worker token' -MaskInput
+$event = @{eventCode='APPROVED';triggerType='WORKFLOW_TRANSITION';schemaVersion=1;idempotencyKey=[guid]::NewGuid().ToString();data=@{reference='PR-1001'}} | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Method Post -Uri "$base/events/publish" -Headers @{Authorization="Bearer $service"} -ContentType 'application/json' -Body $event
+Invoke-RestMethod -Method Post -Uri "$base/worker" -Headers @{Authorization="Bearer $worker"} -ContentType 'application/json' -Body '{}'
+Remove-Variable service,worker
+```
+
+Refresh Flutter inbox. Expected title: `Purchase update`; body: `Hello Demo User, record PR-1001 was updated.` Verify unread count increases relative to baseline, click the notification, and verify the count decreases. Replay the same event payload with the same idempotency key to test duplicate prevention. Worker claimed count alone is not proof of successful delivery. If empty, inspect jobs, deliveries and runtime logs without exposing credentials. Do not reset the database.
+
+## 49. CI and release gates (proposed)
+
+Start with GitHub Actions checks for pull requests and main: install a pinned compatible Flutter SDK, run `flutter pub get`, `flutter analyze`, `flutter test` in flutter_sdk; build the demo web app; run `node --test tests/parser.test.mjs` with Node 22. Private Git dependency access in CI requires an explicitly configured read-only deploy key or other approved scoped credential; do not assume the default workflow token can authenticate SSH. Keep cloud smoke tests manual or in a protected DEV environment with scoped, rotated secrets. The archive contains a Python smoke script; review its environment variables and assertions before execution. No workflow has been installed or run yet.
+
+Production gates remain: tenant isolation and scope rejection, reliable outbox and worker retry behavior, identity lifecycle, token exchange/revocation, provider integration, consent, callbacks, monitoring and load/security tests. External delivery in the baseline is mocked; ACCEPTED is not proof of actual SMS or WhatsApp delivery. Push, realtime and automatic scheduling are not implemented in this baseline. The admin UI is a JSON-based DEV console, not a finished production designer. The target channel matrix in section 1 remains unchanged.

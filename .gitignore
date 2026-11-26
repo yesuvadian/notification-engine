@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+supabase/.temp/
+supabase/.branches/
+node_modules/
+__pycache__/
