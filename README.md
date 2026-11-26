@@ -22,7 +22,7 @@ Spec table names map to the physical tables like this: tables keep their `ntf.nt
 
 ## Upgrade the shared DEV project (owefydcgkvpwvllsbhcx)
 
-Migrations `20260101000001`–`03` are already applied. The new files are additive and safe to re-run. Don't reset the database.
+Migrations `20260101000001`–`03` are already applied. Apply `20261126000001`–`04` in order. The new files are additive and safe to re-run. Don't reset the database.
 
 1. **Enable extensions** under Dashboard → Database → Extensions: `pgmq`, `pg_cron` and `pg_net` (Vault is on by default). Migration 2 also tries to create them.
 2. **Apply the migrations in order.** Either paste each file into the SQL Editor, or run:
@@ -47,6 +47,8 @@ Migrations `20260101000001`–`03` are already applied. The new files are additi
    `python tests/smoke.py` needs `NOTIFICATION_BASE_URL`, `NOTIFICATION_SERVICE_TOKEN`, `NOTIFICATION_WORKER_TOKEN`, `NOTIFICATION_USER_TOKEN` and `NOTIFICATION_ORG_ID`.
 
 ## Onboard a product in the same Supabase project (e.g. CMM)
+
+For the Astute products (cmm, ast, ass, afd), run migration `20261126000004_ntf_product_channel_defaults.sql` and then `supabase/scripts/onboard_astute_products.sql`. That registers the products, their channel defaults and the CMM issuer, and prints one product token each. `select ntf.ntf_assign_org('<code>', '<org uuid>', '<name>')` assigns an organization to a product. The manual steps for any other product are below.
 
 ```sql
 insert into ntf.ntf_products(code, name) values ('cmm', 'CMM') on conflict (code) do nothing;
