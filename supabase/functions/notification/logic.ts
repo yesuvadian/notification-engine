@@ -48,3 +48,31 @@ export function applyMappings(ctx: Record<string, unknown>, mappings: Record<str
   for (const [k, m] of Object.entries(mappings ?? {})) vars[k] = m.type === 'STATIC' ? m.value : path(ctx, m.path ?? '');
   return vars;
 }
+
+export interface TemplateVariable { path: string; type: string; required: boolean; description?: string }
+
+/** Flattens a JSON schema into insertable template variable paths (objects recurse, arrays expose [0] and count). */
+export function schemaVariables(schema: unknown, prefix: string, depth = 0): TemplateVariable[] {
+  const s = (schema ?? {}) as Record<string, unknown>;
+  const props = (s.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const required = new Set(Array.isArray(s.required) ? (s.required as string[]) : []);
+  const out: TemplateVariable[] = [];
+  for (const k of new Set([...Object.keys(props), ...required])) {
+    const ps = props[k] ?? {};
+    const t = String(ps.type ?? 'string');
+    const path = `${prefix}.${k}`;
+    if (t === 'object' && depth < 4) out.push(...schemaVariables(ps, path, depth + 1));
+    else out.push({ path, type: t, required: required.has(k), ...(typeof ps.description === 'string' ? { description: ps.description } : {}) });
+  }
+  return out;
+}
+
+/** Deep-equality for JSON values regardless of object key order (jsonb reorders keys). */
+export function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) return a.length === (b as unknown[]).length && a.every((x, i) => jsonEqual(x, (b as unknown[])[i]));
+  const ka = Object.keys(a as object), kb = Object.keys(b as object);
+  return ka.length === kb.length && ka.every((k) => Object.hasOwn(b as object, k) && jsonEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+}

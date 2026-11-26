@@ -1,6 +1,6 @@
 // Notification engine Edge Function: single entry point, routes under /v1.
 import Ajv from 'npm:ajv@8';
-import { render } from './parser.mjs';
+import { merge, render } from './parser.mjs';
 import { audit, db, q } from './db.ts';
 import { authenticate, isEndUser, isServer, Principal } from './auth.ts';
 import {
@@ -10,6 +10,9 @@ import {
 import { runWorker } from './worker.ts';
 import { PROVIDERS } from './adapters/index.ts';
 import { allowedProviderUrl } from './adapters/http_generic.ts';
+import { adapterFor } from './adapters/index.ts';
+import { Channel } from './adapters/types.ts';
+import { jsonEqual, schemaVariables } from './logic.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -20,7 +23,7 @@ const ajv = new (Ajv as any)({ strict: false, allErrors: true });
 type Body = Record<string, any>;
 
 async function readBody(req: Request): Promise<Body> {
-  if (req.method !== 'POST') return {};
+  if (req.method !== 'POST' && req.method !== 'PUT') return {};
   const len = Number(req.headers.get('content-length') ?? 0);
   if (len > MAX_BODY_BYTES) throw new ApiError(413, 'payload_too_large', 'Request body too large');
   const text = await req.text();
@@ -137,9 +140,9 @@ async function syncMetadata(p: Principal, b: Body, cid: string) {
     const existing = await q(db.from('ntf_events').select('*').eq('product_id', p.productId).eq('code', code).eq('version', version).maybeSingle());
     if (existing) {
       const same = existing.module_code === row.module_code && existing.trigger_type === row.trigger_type &&
-        JSON.stringify(existing.payload_schema) === JSON.stringify(row.payload_schema);
+        jsonEqual(existing.payload_schema, row.payload_schema);
       if (!same) throw new ApiError(409, 'version_conflict', `${code} v${version} already exists with a different contract; publish a new version`);
-      if (JSON.stringify(existing.metadata) !== JSON.stringify(row.metadata)) {
+      if (!jsonEqual(existing.metadata, row.metadata)) {
         await q(db.from('ntf_events').update({ metadata: row.metadata }).eq('product_id', p.productId).eq('code', code).eq('version', version));
       }
       unchanged++;
@@ -308,6 +311,116 @@ async function assertTemplateAllowed(p: Principal, templateId: unknown) {
   if (!(await allowedTemplateIds(p)).includes(templateId)) throw new ApiError(404, 'not_found', 'Template not found');
 }
 
+// deno-lint-ignore no-explicit-any
+type AuditFn = (action: string, details: Record<string, unknown>) => Promise<any>;
+
+async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid: string, auditWrite: AuditFn) {
+  const [resource, id, action] = seg;
+  const m = req.method;
+
+  // Rules: PUT /rules/{id}, DELETE /rules/{id}
+  if (resource === 'rules' && !action && (m === 'PUT' || m === 'DELETE')) {
+    const rule = await q(db.from('ntf_rules').select('*').eq('id', id).eq('tenant_id', p.tenantId).maybeSingle());
+    if (!rule) throw new ApiError(404, 'not_found', 'Rule not found');
+    if (m === 'DELETE') {
+      await q(db.from('ntf_rule_channels').delete().eq('rule_id', id).eq('tenant_id', p.tenantId));
+      await q(db.from('ntf_rules').delete().eq('id', id).eq('tenant_id', p.tenantId));
+      await auditWrite('rule.delete', { id, event_code: rule.event_code });
+      return json({ ok: true }, 200, cid);
+    }
+    const patch: Body = {};
+    for (const k of ['active', 'conditions', 'recipient_strategy', 'role_code', 'priority', 'purpose', 'schedule_config']) if (k in b) patch[k] = b[k];
+    if ('active' in patch && typeof patch.active !== 'boolean') throw new ApiError(422, 'invalid_request', 'active must be boolean');
+    const saved = await q(db.from('ntf_rules').update(patch).eq('id', id).eq('tenant_id', p.tenantId).select().single());
+    await auditWrite('rule.update', { id, fields: Object.keys(patch) });
+    return json(saved, 200, cid);
+  }
+
+  // Rule channels: DELETE /rule-channels/{ruleId}?channel=SMS  (or /rule-channels/{ruleId}/{channel})
+  if (resource === 'rule-channels' && m === 'DELETE') {
+    const channel = String(action ?? new URL(req.url).searchParams.get('channel') ?? '').toUpperCase();
+    const rows = await q(db.from('ntf_rule_channels').delete().eq('rule_id', id).eq('tenant_id', p.tenantId).eq('channel', channel).select('rule_id'));
+    if (!rows.length) throw new ApiError(404, 'not_found', 'Rule channel not found');
+    await auditWrite('rule_channel.delete', { rule_id: id, channel });
+    return json({ ok: true }, 200, cid);
+  }
+
+  // Overrides: DELETE /overrides/{id} = reset to master (retired, history kept)
+  if (resource === 'overrides' && !action && m === 'DELETE') {
+    const rows = await q(db.from('ntf_overrides').update({ status: 'RETIRED' }).eq('id', id).eq('tenant_id', p.tenantId).eq('status', 'PUBLISHED').select('id,template_id,channel'));
+    if (!rows.length) throw new ApiError(404, 'not_found', 'No published override with this id');
+    await auditWrite('override.reset', { id, template_id: rows[0].template_id, channel: rows[0].channel });
+    return json({ ok: true }, 200, cid);
+  }
+
+  // Templates: GET /templates/{templateId}/effective?channel=&locale=&version=
+  if (resource === 'templates' && action === 'effective' && m === 'GET') {
+    await assertTemplateAllowed(p, id);
+    const u = new URL(req.url);
+    const channel = (u.searchParams.get('channel') ?? 'IN_APP').toUpperCase(), locale = u.searchParams.get('locale') ?? 'en';
+    let s = db.from('ntf_template_versions').select('*').eq('template_id', id).eq('channel', channel).eq('locale', locale).eq('status', 'PUBLISHED');
+    if (u.searchParams.get('version')) s = s.eq('version', Number(u.searchParams.get('version')));
+    const versions = await q(s.order('version', { ascending: false }).limit(1));
+    if (!versions.length) throw new ApiError(404, 'not_found', 'No published master version for this channel/locale');
+    const master = versions[0];
+    const override = await q(db.from('ntf_overrides').select('*').eq('tenant_id', p.tenantId).eq('template_id', id).eq('channel', channel)
+      .eq('locale', locale).eq('base_version', master.version).eq('status', 'PUBLISHED').maybeSingle());
+    return json({ master, override, effective: merge(master.content, override?.patch), source: override ? 'OVERRIDE' : 'MASTER' }, 200, cid);
+  }
+
+  // Events: GET /events/{code}/variables?version=
+  if (resource === 'events' && action === 'variables' && m === 'GET') {
+    const version = Number(new URL(req.url).searchParams.get('version') ?? 1);
+    const ev = await q(db.from('ntf_events').select('payload_schema,metadata').eq('product_id', p.productId).eq('code', id).eq('version', version).maybeSingle());
+    if (!ev) throw new ApiError(404, 'not_found', 'Event not found');
+    return json({ variables: [
+      ...schemaVariables(ev.payload_schema, 'data'),
+      { path: 'recipient.name', type: 'string', required: false, description: 'Recipient display name' },
+      { path: 'recipient.id', type: 'string', required: true, description: 'Recipient user id' },
+      { path: 'recipient.locale', type: 'string', required: false, description: 'Recipient locale' }
+    ] }, 200, cid);
+  }
+
+  // Deliveries: GET /deliveries/{id}/attempts, POST /deliveries/{id}/retry
+  if (resource === 'deliveries' && action === 'attempts' && m === 'GET') {
+    return json(await q(db.from('ntf_delivery_attempts').select('*').eq('delivery_id', id).eq('tenant_id', p.tenantId).order('attempt')), 200, cid);
+  }
+  if (resource === 'deliveries' && action === 'retry' && m === 'POST') {
+    const r = await q(db.rpc('ntf_requeue_delivery', { p_delivery: id, p_tenant: p.tenantId }));
+    if (!r) throw new ApiError(409, 'not_retryable', 'Only FAILED or DEAD_LETTERED external deliveries can be retried');
+    await auditWrite('delivery.retry', { id });
+    return json({ ok: true }, 200, cid);
+  }
+
+  // Channels: POST /channels/{channel}/test  {userId} or {phone}, optional title/body
+  if (resource === 'channels' && action === 'test' && m === 'POST') {
+    const channel = id.toUpperCase() as Channel;
+    if (!['SMS', 'WHATSAPP', 'PUSH'].includes(channel)) throw new ApiError(422, 'invalid_request', 'Test send supports SMS, WHATSAPP and PUSH');
+    const since = new Date(Date.now() - 10 * 60000).toISOString();
+    const { count } = await db.from('ntf_audit_logs').select('id', { count: 'exact', head: true })
+      .eq('tenant_id', p.tenantId).eq('action', 'channel.test').gt('created_at', since);
+    if ((count ?? 0) >= 10) throw new ApiError(429, 'rate_limited', 'At most 10 test sends per 10 minutes');
+    let recipient = { userId: 'test', displayName: 'Test', phone: null as string | null, email: null, locale: null, deviceTokens: [] as { id: string; token: string }[] };
+    if (b.userId) {
+      const u = await q(db.from('ntf_users').select('*').eq('tenant_id', p.tenantId).eq('user_id', b.userId).maybeSingle());
+      if (!u) throw new ApiError(404, 'not_found', 'User not synced');
+      const tokens = channel === 'PUSH' ? await q(db.from('ntf_device_tokens').select('id,token').eq('tenant_id', p.tenantId).eq('user_id', u.user_id).eq('active', true).limit(5)) : [];
+      recipient = { userId: u.user_id, displayName: u.display_name, phone: u.phone, email: null, locale: u.locale, deviceTokens: tokens };
+    } else if (typeof b.phone === 'string' && /^\+[1-9]\d{6,14}$/.test(b.phone)) {
+      recipient.phone = b.phone;
+    } else throw new ApiError(422, 'invalid_request', 'Give userId (synced user) or an E.164 phone');
+    const config = (await q(db.rpc('ntf_effective_channel_config', { p_tenant: p.tenantId, p_channel: channel }))) ?? {};
+    const adapter = adapterFor(channel, config);
+    const secret = adapter.provider === 'mock' ? {} : ((await q(db.rpc('ntf_get_provider_secret', { p_tenant: p.tenantId, p_channel: channel }))) ?? {});
+    const payload = { title: 'Test notification', body: 'Test message from the notification engine', ...(b.payload && typeof b.payload === 'object' ? b.payload : {}) };
+    const r = await adapter.send({ deliveryId: `test-${crypto.randomUUID()}`, tenantId: p.tenantId, channel, payload, recipient, config, secret });
+    await auditWrite('channel.test', { channel, provider: adapter.provider, outcome: r.outcome, userId: b.userId ?? null });
+    return json({ provider: adapter.provider, configSource: config._source ?? (config.provider ? 'organization' : 'none'), ...r }, 200, cid);
+  }
+
+  throw new ApiError(404, 'not_found', 'Unknown admin resource');
+}
+
 async function admin(p: Principal, req: Request, path: string, b: Body, cid: string) {
   if (!p.isAdmin) forbid('Admin access required');
   const resource = path.split('/')[3];
@@ -321,6 +434,9 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
       throw new ApiError(422, 'template_error', String((e as Error).message));
     }
   }
+  // ---- sub-resources: /v1/admin/<resource>/<id>[/<action>]
+  const seg = path.split('/').slice(3); // [resource, id, action?]
+  if (seg.length >= 2) return await adminItem(p, req, seg, b, cid, auditWrite);
   if (path.split('/').length !== 4) throw new ApiError(404, 'not_found', 'Unknown admin resource');
 
   if (req.method === 'GET') {
@@ -336,6 +452,12 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
     let s = db.from(table).select('*');
     s = resource === 'events' ? s.eq('product_id', p.productId) : s.eq('tenant_id', p.tenantId);
     if (['audit', 'attempts', 'deliveries'].includes(resource)) s = s.order('created_at', { ascending: false });
+    const qp = new URL(req.url).searchParams;
+    if (resource === 'deliveries') {
+      s = db.from('ntf_deliveries').select('*,notification:ntf_notifications!inner(user_id,title,event_id,created_at)').eq('tenant_id', p.tenantId).order('created_at', { ascending: false });
+      if (qp.get('status')) s = s.eq('status', qp.get('status')!.toUpperCase());
+      if (qp.get('channel')) s = s.eq('channel', qp.get('channel')!.toUpperCase());
+    }
     return json(await q(s.limit(100)), 200, cid);
   }
 
@@ -379,9 +501,16 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
 
   if (resource === 'overrides') {
     await assertTemplateAllowed(p, b.template_id);
+    const channel = String(b.channel ?? '').toUpperCase(), locale = b.locale ?? 'en';
+    if (!b.patch || typeof b.patch !== 'object' || Array.isArray(b.patch)) throw new ApiError(422, 'invalid_request', 'patch must be an object');
+    const prev = await q(db.from('ntf_overrides').select('version').eq('tenant_id', p.tenantId).eq('template_id', b.template_id)
+      .eq('channel', channel).eq('locale', locale).order('version', { ascending: false }).limit(1));
+    // Publishing a new override retires the previously published one (immutable history).
+    await q(db.from('ntf_overrides').update({ status: 'RETIRED' }).eq('tenant_id', p.tenantId).eq('template_id', b.template_id)
+      .eq('channel', channel).eq('locale', locale).eq('status', 'PUBLISHED'));
     const saved = await q(db.from('ntf_overrides').insert({
-      tenant_id: p.tenantId, template_id: b.template_id, base_version: b.base_version, channel: b.channel,
-      locale: b.locale ?? 'en', version: b.version, patch: b.patch, status: 'PUBLISHED'
+      tenant_id: p.tenantId, template_id: b.template_id, base_version: b.base_version, channel,
+      locale, version: Number.isInteger(b.version) ? b.version : (prev[0]?.version ?? 0) + 1, patch: b.patch, status: 'PUBLISHED'
     }).select().single());
     await auditWrite('override.publish', { id: saved.id, template_id: b.template_id, channel: b.channel });
     return json(saved, 201, cid);

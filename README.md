@@ -13,7 +13,7 @@ A shared notification engine: the Supabase `ntf` schema, one Edge Function (`not
 | Worker | pgmq queues `ntf_events`, `ntf_deliveries` and `ntf_dlq`, with one message per external delivery. Visibility timeouts, exponential backoff with jitter, dead-lettering, and `ntf_delivery_attempts`. pg_cron invokes it every minute through pg_net, with the URL and token in Vault. |
 | Channels | IN_APP; SMS (Twilio, MSG91); WhatsApp (Meta Cloud API, approved templates); push (FCM HTTP v1). Credentials are in Vault. A channel with no provider uses the DEV mock (`ACCEPTED` is not proof of delivery). |
 | User APIs | Paginated inbox, unread count, mark read (one, many or all), device register/unregister, and per-channel preferences and consent. |
-| Admin | Scoped JSON admin APIs: templates, events, roles, rules, rule-channels, channels (with provider config), overrides, deliveries, attempts, and audit. Every write is audited. |
+| Admin | Scoped JSON admin APIs: templates, events, roles, rules, rule-channels, channels (with provider config), overrides, deliveries, attempts, and audit. Every write is audited. Also: rule update/delete (`PUT`/`DELETE /v1/admin/rules/{id}`), unbind (`DELETE /v1/admin/rule-channels/{ruleId}/{channel}`), override reset (`DELETE /v1/admin/overrides/{id}`), effective template (`GET /v1/admin/templates/{id}/effective`), event variables (`GET /v1/admin/events/{code}/variables`), delivery attempts and retry, and channel test send (`POST /v1/admin/channels/{channel}/test`). |
 | Errors | `{error, message, correlationId}` with 400/401/403/404/409/413/422/500. `x-correlation-id` is echoed. |
 
 Not implemented yet: provider delivery webhooks (so SENT is the last state for external channels), realtime inbox (the SDK polls), quiet hours, per-tenant rate limits and quotas, scheduled sends and condition endpoints, and a visual template designer.
@@ -22,7 +22,7 @@ Spec table names map to the physical tables like this: tables keep their `ntf.nt
 
 ## Upgrade the shared DEV project (owefydcgkvpwvllsbhcx)
 
-Migrations `20260101000001`–`03` are already applied. Apply `20261126000001`–`05` in order. The new files are additive and safe to re-run. Don't reset the database.
+Migrations `20260101000001`–`03` are already applied. Apply `20261126000001`–`06` in order. The new files are additive and safe to re-run. Don't reset the database.
 
 1. **Enable extensions** under Dashboard → Database → Extensions: `pgmq`, `pg_cron` and `pg_net` (Vault is on by default). Migration 2 also tries to create them.
 2. **Apply the migrations in order.** Either paste each file into the SQL Editor, or run:
@@ -120,7 +120,8 @@ supabase start && supabase db reset          # applies all migrations + supabase
 cp .env.example .env.local
 supabase functions serve notification --env-file .env.local --no-verify-jwt
 python tests/smoke.py                         # end to end (calls the worker directly)
-python tests/api_contract.py                  # 30 API contract checks
+python tests/api_contract.py                  # 60 API contract checks
+python tests/integration_providers.py         # every provider option end to end (needs tests/fake_provider.ts, see file header)
 node --test tests/parser.test.mjs && deno test -A tests/logic.test.ts
 cd flutter_sdk && flutter pub get && flutter analyze && flutter test
 ```

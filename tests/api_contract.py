@@ -53,6 +53,50 @@ s,b,_=call('POST','/auth/exchange',S,{'userId':'u1','scope':'admin'}); check('ex
 s,b,_=call('GET','/nope',U,org=ORG); check('404 route',s==404,(s,b))
 s,b,h=call('GET','/notifications',U,org=ORG,hdr={'X-Correlation-Id':'abc'}); check('correlation echo',h.get('x-correlation-id')=='abc',h)
 
+# ---------------------------------------------------------------- Part A: admin APIs
+import random
+s,b,_=call('POST','/admin/rules',A,{'event_code':'APPROVED','recipient_strategy':'ALL_USERS_IN_ROLE','role_code':'manager','purpose':'contract-'+str(uuid.uuid4())[:8],'active':False},org=ORG); check('A rule create 201',s==201,(s,b))
+rid=b.get('id') if isinstance(b,dict) else None
+s,b,_=call('PUT','/admin/rules/%s'%rid,A,{'active':True,'priority':5},org=ORG); check('A rule update',s==200 and b['active'] is True and b['priority']==5,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,A,{'active':'yes'},org=ORG); check('A rule update bad type 422',s==422,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%uuid.uuid4(),A,{'active':True},org=ORG); check('A rule update unknown 404',s==404,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,U,{'active':True},org=ORG); check('A rule update by user 403',s==403,(s,b))
+TPL='40000000-0000-0000-0000-000000000001'
+s,b,_=call('POST','/admin/rule-channels',A,{'rule_id':rid,'channel':'IN_APP','template_id':TPL,'template_version':1},org=ORG); check('A rule-channel bind',s==200,(s,b))
+s,b,_=call('DELETE','/admin/rule-channels/%s/IN_APP'%rid,A,org=ORG); check('A rule-channel delete',s==200,(s,b))
+s,b,_=call('DELETE','/admin/rule-channels/%s/IN_APP'%rid,A,org=ORG); check('A rule-channel delete again 404',s==404,(s,b))
+s,b,_=call('DELETE','/admin/rules/%s'%rid,A,org=ORG); check('A rule delete',s==200,(s,b))
+s,b,_=call('GET','/admin/rules',A,org=ORG); check('A rule gone',s==200 and all(r['id']!=rid for r in b),(s,b))
+s,b,_=call('GET','/admin/templates/%s/effective?channel=IN_APP&locale=en'%TPL,A,org=ORG); check('A template effective',s==200 and b['master']['version']==1 and 'title' in b['effective'],(s,b))
+s,b,_=call('POST','/admin/overrides',A,{'template_id':TPL,'base_version':1,'channel':'IN_APP','patch':{'title':'Override one'}},org=ORG); check('A override publish',s==201,(s,b))
+o1=b.get('id'); v1=b.get('version')
+s,b,_=call('POST','/admin/overrides',A,{'template_id':TPL,'base_version':1,'channel':'IN_APP','patch':{'title':'Override two'}},org=ORG); check('A override republish auto-version',s==201 and b['version']==v1+1,(s,b))
+o2=b.get('id')
+s,b,_=call('GET','/admin/templates/%s/effective?channel=IN_APP'%TPL,A,org=ORG); check('A effective uses latest override',s==200 and b['source']=='OVERRIDE' and b['effective']['title']=='Override two',(s,b))
+s,b,_=call('POST','/admin/overrides',A,{'template_id':TPL,'base_version':1,'channel':'IN_APP','patch':'x'},org=ORG); check('A override bad patch 422',s==422,(s,b))
+s,b,_=call('DELETE','/admin/overrides/%s'%o1,A,org=ORG); check('A reset retired override 404',s==404,(s,b))
+s,b,_=call('DELETE','/admin/overrides/%s'%o2,A,org=ORG); check('A reset to master',s==200,(s,b))
+s,b,_=call('GET','/admin/templates/%s/effective?channel=IN_APP'%TPL,A,org=ORG); check('A effective back to master',s==200 and b['source']=='MASTER',(s,b))
+s,b,_=call('GET','/admin/templates/%s/effective?channel=WHATSAPP&locale=xx'%TPL,A,org=ORG); check('A effective missing channel 404',s==404,(s,b))
+s,b,_=call('GET','/admin/events/APPROVED/variables?version=1',A,org=ORG); check('A event variables',s==200 and any(v['path']=='data.reference' and v['required'] for v in b['variables']) and any(v['path']=='recipient.name' for v in b['variables']),(s,b))
+s,b,_=call('GET','/admin/events/NOPE/variables',A,org=ORG); check('A event variables unknown 404',s==404,(s,b))
+s,b,_=call('GET','/admin/deliveries?channel=IN_APP',A,org=ORG); check('A deliveries filtered',s==200 and all(d['channel']=='IN_APP' for d in b) and (not b or 'notification' in b[0]),(s,b))
+did=b[0]['id'] if s==200 and b else str(uuid.uuid4())
+s,b,_=call('GET','/admin/deliveries/%s/attempts'%did,A,org=ORG); check('A delivery attempts',s==200 and isinstance(b,list),(s,b))
+s,b,_=call('POST','/admin/deliveries/%s/retry'%did,A,{},org=ORG); check('A retry in-app/delivered 409',s==409 and b['error']=='not_retryable',(s,b))
+s,b,_=call('POST','/admin/channels',A,{'channel':'SMS','enabled':True},org=ORG)
+s,b,_=call('POST','/admin/channels/SMS/test',A,{'phone':'+919800000001'},org=ORG); check('A test send (configured or mock)',s==200 and b['outcome'] in ('ACCEPTED','SENT','FAILED','RETRY') and 'provider' in b,(s,b))
+s,b,_=call('POST','/admin/channels/SMS/test',A,{'phone':'12345'},org=ORG); check('A test send bad phone 422',s==422,(s,b))
+s,b,_=call('POST','/admin/channels/IN_APP/test',A,{'phone':'+919800000001'},org=ORG); check('A test send in-app 422',s==422,(s,b))
+s,b,_=call('GET','/admin/nope/x',A,org=ORG); check('A unknown sub-resource 404',s==404,(s,b))
+# metadata sync must ignore key order in schemas
+code='CONTRACT_EV_%d'%random.randint(1,10**9)
+ev1={'code':code,'version':1,'moduleCode':'TEST','triggerType':'ACTION','payloadSchema':{'type':'object','required':['a'],'properties':{'a':{'type':'string'},'b':{'type':'number'}}}}
+ev2=dict(ev1,payloadSchema={'properties':{'b':{'type':'number'},'a':{'type':'string'}},'required':['a'],'type':'object'})
+s,b,_=call('POST','/metadata/sync',S,{'events':[ev1]}); check('A metadata create',s==200 and b['created']==1,(s,b))
+s,b,_=call('POST','/metadata/sync',S,{'events':[ev2]}); check('A metadata same schema other key order',s==200 and b['unchanged']==1,(s,b))
+s,b,_=call('POST','/metadata/sync',S,{'events':[dict(ev1,payloadSchema={'type':'object','required':['b']})]}); check('A metadata changed contract 409',s==409,(s,b))
+
 if FAILED:
     sys.exit('%d checks failed' % len(FAILED))
 print('All contract checks passed')

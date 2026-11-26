@@ -48,3 +48,11 @@ Deno.test('generic http provider url guard', async () => {
     assertThrows(() => allowedProviderUrl(u));
   }
 });
+
+Deno.test('jsonEqual ignores key order but not values', async () => {
+  const { jsonEqual } = await import('../supabase/functions/notification/logic.ts');
+  assert(jsonEqual({ type: 'object', required: ['a'], properties: { a: { type: 'string' }, b: { type: 'number' } } },
+    { properties: { b: { type: 'number' }, a: { type: 'string' } }, required: ['a'], type: 'object' }));
+  assert(!jsonEqual({ required: ['a', 'b'] }, { required: ['b', 'a'] }));
+  assert(!jsonEqual({ a: 1 }, { a: 1, b: 2 }));
+});
