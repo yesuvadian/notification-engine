@@ -697,7 +697,8 @@ class _PlatformTemplatesPageState extends State<PlatformTemplatesPage> {
               subtitle: 'Versions are immutable: edit a draft, publish, retire. Publishing sets the version new organizations start on; '
                   'existing organizations keep theirs until you upgrade them from the organization workspace.',
               actions: [FilledButton.icon(onPressed: create, icon: const Icon(Icons.add), label: const Text('New template'))]),
-          for (final t in rows) _TemplateCard(api: widget.api, t: t, onOpen: () => openDesigner(t), reload: reload),
+          for (final t in rows)
+            _TemplateCard(api: widget.api, t: t, productCode: widget.productCode, onOpen: () => openDesigner(t), reload: reload),
         ]),
       );
 }
@@ -705,9 +706,30 @@ class _PlatformTemplatesPageState extends State<PlatformTemplatesPage> {
 class _TemplateCard extends StatelessWidget {
   final NotificationPlatformApi api;
   final Json t;
+  final String? productCode;
   final VoidCallback onOpen;
   final Future<void> Function() reload;
-  const _TemplateCard({required this.api, required this.t, required this.onOpen, required this.reload});
+  const _TemplateCard({required this.api, required this.t, this.productCode, required this.onOpen, required this.reload});
+
+  /// Moves every organization of [productCode] that uses this template to version [v] (overrides carried).
+  Future<void> _rollOut(BuildContext context, int v) async {
+    final pc = productCode!;
+    if (!await confirm(context,
+        title: 'Roll out v$v to all $pc organizations?',
+        message: 'Every organization whose rules use ${t['code']} moves to v$v. Organization overrides are carried over '
+            'where the fields still exist. Organizations that do not use this template are skipped.',
+        action: 'Roll out')) {
+      return;
+    }
+    if (!context.mounted) return;
+    final r = await rollOutTemplate(api, pc, t['id'] as String, v);
+    if (context.mounted) {
+      toast(context,
+          'v$v: ${r.organizations} organizations, ${r.upgraded} rule channels moved, ${r.overridesCarried} overrides carried'
+          '${r.failed.isEmpty ? '' : ', ${r.failed.length} failed (${r.failed.first})'}');
+    }
+    await reload();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -728,6 +750,14 @@ class _TemplateCard extends StatelessWidget {
             Expanded(child: Text('${t['code']}', style: Theme.of(context).textTheme.titleMedium)),
             Text(t['product_id'] == null ? 'Shared' : 'Product only', style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(width: 8),
+            if (productCode != null && t['latestPublished'] != null) ...[
+              OutlinedButton(
+                key: ValueKey('rollout-${t['code']}'),
+                onPressed: () => _rollOut(context, t['latestPublished'] as int),
+                child: Text('Roll out v${t['latestPublished']} to all organizations'),
+              ),
+              const SizedBox(width: 8),
+            ],
             FilledButton(onPressed: onOpen, child: const Text('Open')),
           ]),
           Text('${t['name'] ?? ''} · new organizations start on ${t['latestPublished'] == null ? 'nothing yet' : 'v${t['latestPublished']}'} · '
@@ -766,6 +796,30 @@ class _TemplateCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Result of [rollOutTemplate].
+class RollOutResult {
+  int organizations = 0, upgraded = 0, skipped = 0, overridesCarried = 0;
+  final failed = <String>[];
+}
+
+/// Upgrades [templateId] to [version] in every organization of [productCode] (one engine call per organization).
+Future<RollOutResult> rollOutTemplate(NotificationPlatformApi api, String productCode, String templateId, int version) async {
+  final r = RollOutResult();
+  for (final o in await api.organizations(productCode)) {
+    final id = o['organization_id'] as String;
+    try {
+      final res = await api.organization(productCode, id).upgradeTemplate(templateId, version: version);
+      r.organizations++;
+      r.upgraded += (res['upgraded'] as num?)?.toInt() ?? 0;
+      r.skipped += (res['skipped'] as num?)?.toInt() ?? 0;
+      r.overridesCarried += (res['overridesCarried'] as num?)?.toInt() ?? 0;
+    } catch (e) {
+      r.failed.add('${o['name'] ?? id}: ${errorText(e)}');
+    }
+  }
+  return r;
 }
 
 // =========================================================================== D6 operations and audit

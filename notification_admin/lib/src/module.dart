@@ -50,7 +50,7 @@ class NotificationAdminModule {
   List<NotificationMenuItem> get engineMenu => [
         NotificationMenuItem('ntf-products', 'Products', Icons.widgets_outlined, (_) => ProductsPage(api: api)),
         NotificationMenuItem('ntf-channels', 'Channels', Icons.cell_tower, (_) => PlatformChannelsPage(api: api)),
-        NotificationMenuItem('ntf-templates', 'Templates', Icons.article_outlined, (_) => PlatformTemplatesPage(api: api)),
+        NotificationMenuItem('ntf-templates', 'Templates', Icons.article_outlined, (_) => PlatformTemplatesPage(api: api, productCode: productCode.isEmpty ? null : productCode)),
         NotificationMenuItem('ntf-operations', 'Operations', Icons.monitor_heart_outlined, (_) => OperationsPage(api: api)),
         NotificationMenuItem('ntf-audit', 'Audit', Icons.history, (_) => PlatformAuditPage(api: api)),
       ];

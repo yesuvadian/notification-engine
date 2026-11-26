@@ -390,6 +390,48 @@ void main() {
     });
   });
 
+  group('D4 roll out to organizations', () {
+    Map<String, dynamic> tpl() => {
+          'id': 't1', 'code': 'RENT_DUE', 'name': 'Rent due', 'product_id': null, 'latestPublished': 2,
+          'organizationsWithOverrides': 0, 'pinnedOrganizations': {'1': 2},
+          'versions': [{'version': 2, 'channel': 'IN_APP', 'status': 'PUBLISHED', 'content': {}}],
+        };
+
+    testWidgets('product templates are filtered and v2 rolls out to every organization', (t) async {
+      await big(t);
+      final f = FakeEngine({
+        'GET /v1/platform/templates': (_) => [tpl()],
+        'GET /v1/platform/organizations': (_) => [
+              {'organization_id': 'o1', 'name': 'Green Meadows'},
+              {'organization_id': 'o2', 'name': 'Lake View'},
+              {'organization_id': 'o3', 'name': 'Hill Top'},
+            ],
+        'POST /v1/admin/templates/t1/upgrade': (r) => r.headers['X-Organization-Id'] == 'o3'
+            ? err(404, 'not_found', 'Template not used')
+            : {'upgraded': 2, 'skipped': 0, 'overridesCarried': 1},
+      });
+      await t.pumpWidget(host(PlatformTemplatesPage(api: platformFor(f), productCode: 'cmm')));
+      await t.pumpAndSettle();
+      expect(f.calls.first.url.queryParameters['product'], 'cmm');
+      await t.tap(find.byKey(const ValueKey('rollout-RENT_DUE')));
+      await t.pumpAndSettle();
+      await tapText(t, 'Roll out');
+      final ups = f.hits('POST /v1/admin/templates/t1/upgrade');
+      expect(ups.map((r) => r.headers['X-Organization-Id']), ['o1', 'o2', 'o3']);
+      expect(ups.every((r) => r.headers['X-Product-Code'] == 'cmm'), isTrue);
+      expect(f.bodies('POST /v1/admin/templates/t1/upgrade').first, {'version': 2});
+      expect(find.textContaining('v2: 2 organizations, 4 rule channels moved, 2 overrides carried, 1 failed (Hill Top: Template not used)'), findsOneWidget);
+    });
+
+    testWidgets('no roll-out button on the engine-wide page (no product)', (t) async {
+      await big(t);
+      final f = FakeEngine({'GET /v1/platform/templates': (_) => [tpl()]});
+      await t.pumpWidget(host(PlatformTemplatesPage(api: platformFor(f))));
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('rollout-RENT_DUE')), findsNothing);
+    });
+  });
+
   group('D5 Designer (platform)', () {
     Map<String, dynamic> tpl() => {
           'id': 't1',
