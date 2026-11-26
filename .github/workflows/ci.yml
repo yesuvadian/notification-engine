@@ -56,7 +56,7 @@ jobs:
           deno-version: v2.x
       - run: node --test tests/parser.test.mjs
       - run: deno check supabase/functions/notification/index.ts typescript_sdk/client.ts
-      - run: deno test -A tests/logic.test.ts
+      - run: deno test -A tests/logic.test.ts tests/config.test.ts
 
   migrations:
     # Applies every migration plus the local seed to a disposable Supabase Postgres image (with pgmq, pg_cron, pg_net, vault).

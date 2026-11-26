@@ -62,10 +62,13 @@ alter table ntf.ntf_api_tokens add column if not exists revoked_at timestamptz;
 update ntf.ntf_api_tokens k set product_id = t.product_id from ntf.ntf_tenants t where k.tenant_id = t.id and k.product_id is null;
 alter table ntf.ntf_api_tokens alter column tenant_id drop not null;
 alter table ntf.ntf_api_tokens drop constraint if exists ntf_api_tokens_scope_check;
-alter table ntf.ntf_api_tokens add constraint ntf_api_tokens_scope_check check (scope in ('service','admin','user','product'));
+-- 'platform' is added by 20261126000007; listed here too so re-running this file after it stays safe.
+alter table ntf.ntf_api_tokens add constraint ntf_api_tokens_scope_check check (scope in ('service','admin','user','product','platform'));
 alter table ntf.ntf_api_tokens drop constraint if exists ntf_api_tokens_binding_check;
 alter table ntf.ntf_api_tokens add constraint ntf_api_tokens_binding_check check (
-  (scope = 'product' and product_id is not null and tenant_id is null) or (scope <> 'product' and tenant_id is not null));
+  (scope = 'product' and product_id is not null and tenant_id is null)
+  or (scope = 'platform' and product_id is null and tenant_id is null)
+  or (scope not in ('product','platform') and tenant_id is not null));
 create index if not exists ntf_api_tokens_expiry on ntf.ntf_api_tokens (expires_at);
 
 -- Idempotency conflict detection (spec §5, §40: reused key + different payload => 409)

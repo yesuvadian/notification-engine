@@ -1123,4 +1123,21 @@ This section records what the code in the repository implements. Sections 1–45
 | §40 errors and observability | Error envelope `{error, message, correlationId}`. Status codes 400, 401, 403, 404, 405, 409, 413, 422 and 500. Body limit 256 KB. Audit log for admin writes, syncs, exchanges, provisioning and preference changes. `ntf_queue_metrics()`. `GET /v1/health`. |
 | §47.2 SDK | `notification_sdk` 0.2.0 is additive: `productCode`, `inboxPage`, `markAllRead`, `markManyRead`, devices, preferences, and error codes on `NotificationApiException`. Pin by release tag. |
 
-Still open: provider delivery webhooks (signature verification, out-of-order status), realtime inbox, quiet hours, per-tenant quotas and rate limits, scheduled sends and condition endpoints, template designer and full lifecycle (draft/publish APIs), retention jobs for notifications, and load and security tests on hosted DEV.
+Still open: provider delivery webhooks (signature verification, out-of-order status), realtime inbox, quiet hours, per-tenant quotas and rate limits, scheduled sends and condition endpoints, template designer UI, retention jobs for notifications, and load and security tests on hosted DEV.
+
+## 51. Platform super admin, phase 1 (26 November 2026)
+
+The platform super admin manages everything for every organization in this phase; organization admins get write access later (`ntf_platform_settings.org_admin_writes`).
+
+| Area | Implementation |
+|---|---|
+| Login | `platform` scope tokens; JWTs from `ntf_platform_issuers` with `X-Platform-Admin: true`. A user is a super admin by claim (`admin_claim`/`admin_value`, dotted paths allowed) or by `ntf_platform_admins`. `X-Product-Code` + `X-Organization-Id` select the organization being managed (suspended ones included). |
+| Products | `GET/POST /v1/platform/products`, `POST .../{code}/status`, `PUT .../{code}/channels` (supported, on for new organizations; IN_APP always on), `GET/POST .../{code}/tokens` (token shown once), `DELETE /v1/platform/tokens/{id}`, `GET/POST .../{code}/issuers`. |
+| Organizations | `GET /v1/platform/organizations?product=&search=&status=` (channels, members, deliveries in 7 days), `POST /v1/platform/organizations` with `preferences` (group = event `module_code` -> channels) and `settings` (inbox retention, unread badge, day grouping, push prompt and text, members_can_change), `POST .../status` (reason required to suspend), `GET /v1/platform/groups?product=`. |
+| Add-only | `ntf_org_preferences` (PROVISIONED / ADDED), `ntf_org_settings` and enabled channels of managed organizations can only grow; enforced by triggers. The worker sends a group's notifications only on the organization's channels for that group. |
+| Providers | `ntf_platform_channels`: one provider per external channel; `ntf_effective_channel_config` prefers it over the earlier organization/product settings. `ntf_set_platform_secret` writes `ntf_shared_<channel>` to Vault (write-only). Platform test send. |
+| Templates | `GET/POST /v1/platform/templates`, `POST .../{id}/versions` (draft; published versions are immutable), `.../versions/{v}/publish`, `.../versions/{v}/retire` (refused while pinned or overridden). New bindings default to the latest published version; `POST /v1/admin/templates/{id}/upgrade` moves one organization and carries its overrides. |
+| Member app | `GET /v1/settings`; preferences of managed organizations are read-only for members (consent still per member); inbox and unread count honour the retention days. |
+| Operations | `GET /v1/platform/overview`, `/ops` (queues, dead letters), `POST /v1/platform/deliveries/{id}/replay`, `GET /v1/platform/audit`. All platform writes are audited as `platform.*`. |
+
+Tests: `tests/platform_contract.py` (122 checks), `tests/integration_providers.py` (providers through the platform API, plus the legacy fallback), `tests/config.test.ts`.

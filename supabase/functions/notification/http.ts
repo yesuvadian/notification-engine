@@ -3,7 +3,7 @@
 export const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers':
-    'authorization,content-type,x-organization-id,x-product-code,x-correlation-id,apikey,x-client-info',
+    'authorization,content-type,x-organization-id,x-product-code,x-platform-admin,x-correlation-id,apikey,x-client-info',
   'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
   'Access-Control-Expose-Headers': 'x-correlation-id,idempotent-replayed'
 };

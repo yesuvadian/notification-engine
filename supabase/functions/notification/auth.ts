@@ -7,7 +7,7 @@ import { createRemoteJWKSet, decodeJwt, jwtVerify } from 'npm:jose@5';
 import { db, q } from './db.ts';
 import { ApiError, UUID_RE, sha256Hex } from './http.ts';
 
-export type Scope = 'service' | 'product' | 'admin' | 'user';
+export type Scope = 'service' | 'product' | 'admin' | 'user' | 'platform';
 
 export interface Principal {
   via: 'token' | 'jwt';
@@ -20,6 +20,8 @@ export interface Principal {
   isAdmin: boolean;
   /** Audit actor string, never contains secrets. */
   actor: string;
+  /** Platform super admin (spec §50). tenantId/productId are '' until X-Product-Code / X-Organization-Id name one. */
+  isPlatform?: boolean;
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -127,6 +129,76 @@ async function fromJwt(req: Request, token: string): Promise<Principal> {
   };
 }
 
+// ------------------------------------------------------------------ platform super admin
+
+/** Resolves the optional product and organization a platform admin is acting on. Suspended tenants stay reachable. */
+async function platformContext(req: Request, actor: string, userId: string | null): Promise<Principal> {
+  const productCode = req.headers.get('x-product-code')?.trim() || null;
+  const org = orgHeader(req, false);
+  let productId = '', tenantId = '';
+  if (productCode) {
+    const product = await q(db.from('ntf_products').select('id').eq('code', productCode).maybeSingle());
+    if (!product) throw new ApiError(404, 'product_not_found', 'Unknown product');
+    productId = product.id;
+    if (org) {
+      const t = await q(db.from('ntf_tenants').select('id').eq('product_id', productId).eq('organization_id', org).maybeSingle());
+      if (!t) throw new ApiError(404, 'tenant_not_found', 'Organization is not provisioned for this product');
+      tenantId = t.id;
+    }
+  } else if (org) {
+    throw new ApiError(400, 'product_required', 'X-Product-Code is required with X-Organization-Id');
+  }
+  return { via: userId ? 'jwt' : 'token', scope: 'platform', tenantId, productId, organizationId: org ?? '', userId, isAdmin: true, isPlatform: true, actor };
+}
+
+function claimMatches(v: unknown, expected: string): boolean {
+  if (Array.isArray(v)) return v.map(String).includes(expected);
+  return v !== undefined && v !== null && String(v) === expected;
+}
+
+async function fromPlatformJwt(req: Request, token: string): Promise<Principal> {
+  let iss: string | undefined;
+  try {
+    iss = decodeJwt(token).iss;
+  } catch {
+    throw new ApiError(401, 'unauthorized', 'Malformed token');
+  }
+  if (!iss) throw new ApiError(401, 'unauthorized', 'Token has no issuer');
+  const issuer = await q(db.from('ntf_platform_issuers').select('*').eq('issuer', iss).eq('active', true).maybeSingle());
+  if (!issuer) throw new ApiError(401, 'unauthorized', 'Issuer is not trusted for platform administration');
+  let claims: Record<string, unknown>;
+  if (!issuer.jwks_url) {
+    const { data, error } = await db.auth.getUser(token);
+    if (error || !data?.user) throw new ApiError(401, 'unauthorized', 'Invalid or expired token');
+    claims = decodeJwt(token) as Record<string, unknown>;
+    const aud = claims.aud;
+    if (!(Array.isArray(aud) ? aud.includes(issuer.audience) : aud === issuer.audience)) throw new ApiError(401, 'unauthorized', 'Invalid audience');
+    claims.sub = data.user.id;
+  } else {
+    let jwks = jwksCache.get(issuer.jwks_url);
+    if (!jwks) {
+      jwks = createRemoteJWKSet(new URL(issuer.jwks_url));
+      jwksCache.set(issuer.jwks_url, jwks);
+    }
+    try {
+      claims = (await jwtVerify(token, jwks, { issuer: issuer.issuer, audience: issuer.audience })).payload as Record<string, unknown>;
+    } catch {
+      throw new ApiError(401, 'unauthorized', 'Invalid or expired token');
+    }
+  }
+  const userId = claims[issuer.user_id_claim];
+  if (typeof userId !== 'string' || !userId) throw new ApiError(401, 'unauthorized', 'Token has no user id claim');
+  let ok: boolean;
+  if (issuer.admin_claim) {
+    ok = claimMatches(issuer.admin_claim.split('.').reduce((o: unknown, k: string) => (o as Record<string, unknown> | undefined)?.[k], claims), issuer.admin_value);
+  } else {
+    const a = await q(db.from('ntf_platform_admins').select('active').eq('issuer', iss).eq('user_id', userId).maybeSingle());
+    ok = a?.active === true;
+  }
+  if (!ok) throw new ApiError(403, 'forbidden', 'Platform super admin access required');
+  return await platformContext(req, `platform:${userId}`, userId);
+}
+
 async function fromOpaque(req: Request, token: string): Promise<Principal> {
   const a = await q(
     db.from('ntf_api_tokens').select('*').eq('token_hash', await sha256Hex(token))
@@ -134,6 +206,7 @@ async function fromOpaque(req: Request, token: string): Promise<Principal> {
   );
   if (!a) throw new ApiError(401, 'unauthorized', 'Invalid or expired token');
   const label = `token:${a.scope}:${(a.token_hash as string).slice(0, 8)}`;
+  if (a.scope === 'platform') return await platformContext(req, label, null);
 
   if (a.scope === 'product') {
     await activeProduct(a.product_id);
@@ -159,7 +232,8 @@ async function fromOpaque(req: Request, token: string): Promise<Principal> {
 export async function authenticate(req: Request): Promise<Principal> {
   const token = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
   if (!token) throw new ApiError(401, 'unauthorized', 'Missing bearer token');
-  return looksLikeJwt(token) ? await fromJwt(req, token) : await fromOpaque(req, token);
+  if (!looksLikeJwt(token)) return await fromOpaque(req, token);
+  return req.headers.get('x-platform-admin')?.trim().toLowerCase() === 'true' ? await fromPlatformJwt(req, token) : await fromJwt(req, token);
 }
 
 /** Server-side credentials allowed to publish events and sync identities. */

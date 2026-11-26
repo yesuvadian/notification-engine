@@ -14,5 +14,6 @@ insert into ntf.ntf_channels(tenant_id,channel,enabled) values('30000000-0000-00
 insert into ntf.ntf_rules(id,tenant_id,product_id,event_code,event_version,active,recipient_strategy,role_code,purpose) values('50000000-0000-0000-0000-000000000001','30000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001','APPROVED',1,true,'ALL_USERS_IN_ROLE','manager','approval'),('50000000-0000-0000-0000-000000000002','30000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001','REMINDER',1,true,'ALL_USERS_IN_ROLE','manager','reminder');
 insert into ntf.ntf_rule_channels(rule_id,tenant_id,channel,template_id,template_version) select id,tenant_id,'IN_APP','40000000-0000-0000-0000-000000000001',1 from ntf.ntf_rules;
 insert into ntf.ntf_api_tokens select encode(extensions.digest(token,'sha256'),'hex'),'30000000-0000-0000-0000-000000000001',uid,scope,now()+interval '30 days' from (values('local-service-only',null,'service'),('local-worker-only',null,'service'),('local-admin-only',null,'admin'),('local-user-only','u1','user')) as v(token,uid,scope);
+insert into ntf.ntf_api_tokens(token_hash,scope,expires_at,label) values(encode(extensions.digest('local-platform-only','sha256'),'hex'),'platform',now()+interval '30 days','local');
 
 commit;

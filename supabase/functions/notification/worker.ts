@@ -39,6 +39,11 @@ async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueue
     .eq('event_version', e.event_version).eq('active', true).order('priority', { ascending: false }));
   const channelRows: Row[] = await q(db.from('ntf_channels').select('channel,enabled').eq('tenant_id', t.id));
   const channelEnabled = new Map(channelRows.map((c) => [c.channel, c.enabled === true]));
+  // Organization preferences (spec §50): when the organization has channels set for this event's group
+  // (event module_code), only those channels are used. Groups without rows are not restricted.
+  const ev = await q(db.from('ntf_events').select('module_code').eq('product_id', e.product_id).eq('code', e.event_code).eq('version', e.event_version).maybeSingle());
+  const groupRows: Row[] = ev ? await q(db.from('ntf_org_preferences').select('channel').eq('tenant_id', t.id).eq('group_code', String(ev.module_code).toUpperCase())) : [];
+  const groupChannels = groupRows.length ? new Set(groupRows.map((r) => r.channel)) : null;
 
   // Resolve recipients per rule (batched).
   const perRule: { rule: Row; ids: string[] }[] = [];
@@ -99,6 +104,7 @@ async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueue
       if (!u) continue;
       const nKey = `${id}|${rule.purpose}`;
       for (const ch of channels) {
+        if (groupChannels && !groupChannels.has(ch.channel)) continue;
         if (!eligible(ch.channel, channelEnabled.get(ch.channel) ?? false, prefs.get(`${id}|${ch.channel}`))) continue;
         const tpl = await resolveTemplate(ch);
         const ctx: Row = { ...e.payload, recipient: { name: u.display_name, id: u.user_id, locale: u.locale } };

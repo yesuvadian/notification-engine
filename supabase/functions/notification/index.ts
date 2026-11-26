@@ -8,8 +8,7 @@ import {
   requireArray, requireString, safeEqual, sha256Hex, toApiError, UUID_RE
 } from './http.ts';
 import { runWorker } from './worker.ts';
-import { PROVIDERS } from './adapters/index.ts';
-import { allowedProviderUrl } from './adapters/http_generic.ts';
+import { platform } from './platform.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel } from './adapters/types.ts';
 import { jsonEqual, schemaVariables } from './logic.ts';
@@ -172,6 +171,30 @@ async function provisionTenant(req: Request, b: Body, cid: string) {
   return json({ ...r, organizationId: org }, 200, cid);
 }
 
+// ---------------------------------------------------------------- organization settings (spec §50)
+
+const DEFAULT_ORG_SETTINGS = { inbox_retention_days: null, unread_badge: true, group_by_day: true, push_prompt: 'after_first_notification', push_explanation: null, members_can_change: true };
+
+/** Settings provisioned by the super admin; null for organizations created before §50 (unmanaged). */
+async function orgSettings(tenantId: string): Promise<Body | null> {
+  return await q(db.from('ntf_org_settings').select('*').eq('tenant_id', tenantId).maybeSingle());
+}
+
+function retentionCutoff(s: Body | null): string | null {
+  return s?.inbox_retention_days ? new Date(Date.now() - s.inbox_retention_days * 86400000).toISOString() : null;
+}
+
+async function memberSettings(p: Principal, cid: string) {
+  const s = await orgSettings(p.tenantId);
+  const push = await q(db.from('ntf_channels').select('enabled').eq('tenant_id', p.tenantId).eq('channel', 'PUSH').maybeSingle());
+  const v = s ?? DEFAULT_ORG_SETTINGS;
+  return json({
+    managed: !!s, preferencesLocked: !!s && !s.members_can_change,
+    inbox: { retentionDays: v.inbox_retention_days, unreadBadge: v.unread_badge, groupByDay: v.group_by_day },
+    push: { enabled: push?.enabled === true, prompt: push?.enabled ? v.push_prompt : 'off', explanation: v.push_explanation }
+  }, 200, cid);
+}
+
 // ---------------------------------------------------------------- end-user APIs
 
 async function inbox(p: Principal, url: URL, cid: string) {
@@ -185,6 +208,8 @@ async function inbox(p: Principal, url: URL, cid: string) {
     s = s.or(`created_at.lt.${c.createdAt},and(created_at.eq.${c.createdAt},id.lt.${c.id})`);
   }
   if (url.searchParams.get('unread') === 'true') s = s.is('read_at', null);
+  const cutoff = retentionCutoff(await orgSettings(p.tenantId));
+  if (cutoff) s = s.gte('created_at', cutoff);
   const rows = await q(s.order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit + 1));
   const items = rows.slice(0, limit);
   const last = items[items.length - 1];
@@ -192,9 +217,12 @@ async function inbox(p: Principal, url: URL, cid: string) {
 }
 
 async function unreadCount(p: Principal, cid: string) {
-  const { count, error } = await db.from('ntf_notifications')
+  let s = db.from('ntf_notifications')
     .select('id,deliveries:ntf_deliveries!inner(channel)', { count: 'exact', head: true })
     .eq('tenant_id', p.tenantId).eq('user_id', p.userId!).eq('deliveries.channel', 'IN_APP').is('read_at', null);
+  const cutoff = retentionCutoff(await orgSettings(p.tenantId));
+  if (cutoff) s = s.gte('created_at', cutoff);
+  const { count, error } = await s;
   if (error) throw new ApiError(500, 'internal_error', 'Request failed');
   return json({ count: count ?? 0 }, 200, cid);
 }
@@ -243,14 +271,20 @@ async function unregisterDevice(p: Principal, b: Body, cid: string) {
 }
 
 async function getPreferences(p: Principal, cid: string) {
+  const settings = await orgSettings(p.tenantId);
+  const locked = !!settings && !settings.members_can_change;
   const channels = await q(db.from('ntf_channels').select('channel,enabled').eq('tenant_id', p.tenantId));
   const prefs = await q(db.from('ntf_preferences').select('channel,enabled,consent_at,locale').eq('tenant_id', p.tenantId).eq('user_id', p.userId!));
   const byChannel = new Map(prefs.map((x: Body) => [x.channel, x]));
   return json({
     items: channels.filter((c: Body) => c.enabled).map((c: Body) => {
       const x = byChannel.get(c.channel) as Body | undefined;
-      return { channel: c.channel, enabled: x?.enabled ?? true, consent: c.channel === 'IN_APP' ? true : !!x?.consent_at, consentAt: x?.consent_at ?? null };
-    })
+      return {
+        channel: c.channel, enabled: locked ? true : (x?.enabled ?? true), consent: c.channel === 'IN_APP' ? true : !!x?.consent_at,
+        consentAt: x?.consent_at ?? null, locked: locked || c.channel === 'IN_APP'
+      };
+    }),
+    locked
   }, 200, cid);
 }
 
@@ -258,39 +292,20 @@ async function setPreferences(p: Principal, b: Body, cid: string) {
   const items = requireArray(b.items, 'items', 10) as Body[];
   const enabledChannels = new Set((await q(db.from('ntf_channels').select('channel').eq('tenant_id', p.tenantId).eq('enabled', true))).map((c: Body) => c.channel));
   const now = new Date().toISOString();
+  const settings = await orgSettings(p.tenantId);
+  const locked = !!settings && !settings.members_can_change;
   for (const it of items) {
     const channel = String(it.channel ?? '').toUpperCase();
     if (!CHANNELS.includes(channel)) throw new ApiError(422, 'invalid_request', 'Unknown channel');
     if (!enabledChannels.has(channel)) throw new ApiError(422, 'channel_disabled', `${channel} is not enabled for this organization`);
-    const row: Body = { tenant_id: p.tenantId, user_id: p.userId, channel, enabled: it.enabled !== false, updated_at: now };
+    // Managed organizations: channels are set by the super admin; members can only give or withdraw consent.
+    if (locked && it.enabled === false) throw new ApiError(403, 'preferences_locked', 'Channels are set by your organization');
+    const row: Body = { tenant_id: p.tenantId, user_id: p.userId, channel, enabled: locked ? true : it.enabled !== false, updated_at: now };
     if (typeof it.consent === 'boolean') row.consent_at = it.consent ? now : null;
     await q(db.from('ntf_preferences').upsert(row, { onConflict: 'tenant_id,user_id,channel' }));
   }
   await audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action: 'preferences.update', details: { channels: items.map((i) => i.channel) }, correlationId: cid });
   return await getPreferences(p, cid);
-}
-
-const SECRETISH = /token|secret|password|private|key|auth/i;
-
-function validateProviderConfig(channel: string, cfg: unknown): Body | undefined {
-  if (cfg === undefined) return undefined;
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || JSON.stringify(cfg).length > 4096) {
-    throw new ApiError(422, 'invalid_request', 'provider_config must be a small JSON object');
-  }
-  const c = cfg as Body;
-  const provider = String(c.provider ?? 'mock').toLowerCase();
-  if (!PROVIDERS[channel as keyof typeof PROVIDERS]?.includes(provider)) throw new ApiError(422, 'invalid_request', `Unsupported provider ${provider} for ${channel}`);
-  for (const k of Object.keys(c)) {
-    if (k !== 'secret_name' && SECRETISH.test(k)) throw new ApiError(422, 'invalid_request', `Put credentials in Vault and reference them with secret_name, not ${k}`);
-  }
-  if (provider === 'http') {
-    if (typeof c.url !== 'string') throw new ApiError(422, 'invalid_request', 'http provider needs url');
-    if (!c.url.includes('{{')) {
-      try { allowedProviderUrl(c.url); } catch (e) { throw new ApiError(422, 'invalid_request', (e as Error).message); }
-    }
-    if (c.headers !== undefined && (typeof c.headers !== 'object' || Array.isArray(c.headers))) throw new ApiError(422, 'invalid_request', 'headers must be an object');
-  }
-  return { ...c, provider };
 }
 
 // ---------------------------------------------------------------- admin APIs
@@ -368,6 +383,15 @@ async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid
     return json({ master, override, effective: merge(master.content, override?.patch), source: override ? 'OVERRIDE' : 'MASTER' }, 200, cid);
   }
 
+  // Templates: POST /templates/{templateId}/upgrade {version?} = move this organization to a newer platform version
+  if (resource === 'templates' && action === 'upgrade' && m === 'POST') {
+    await assertTemplateAllowed(p, id);
+    if (b.version !== undefined && !(Number.isInteger(b.version) && b.version > 0)) throw new ApiError(422, 'invalid_request', 'version must be a positive integer');
+    const r = await q(db.rpc('ntf_upgrade_org_template', { p_tenant: p.tenantId, p_template: id, p_to_version: b.version ?? null }));
+    await auditWrite('template.upgrade', { template_id: id, ...r });
+    return json(r, 200, cid);
+  }
+
   // Events: GET /events/{code}/variables?version=
   if (resource === 'events' && action === 'variables' && m === 'GET') {
     const version = Number(new URL(req.url).searchParams.get('version') ?? 1);
@@ -421,8 +445,18 @@ async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid
   throw new ApiError(404, 'not_found', 'Unknown admin resource');
 }
 
+async function orgAdminWritesAllowed(): Promise<boolean> {
+  const s = await q(db.from('ntf_platform_settings').select('value').eq('key', 'org_admin_writes').maybeSingle());
+  return s?.value === true;
+}
+
 async function admin(p: Principal, req: Request, path: string, b: Body, cid: string) {
   if (!p.isAdmin) forbid('Admin access required');
+  if (p.isPlatform && !p.tenantId) throw new ApiError(400, 'organization_required', 'Send X-Product-Code and X-Organization-Id to manage an organization');
+  // Phase 1 of §50: the platform super admin manages organizations; organization admins are read-only.
+  if (!p.isPlatform && req.method !== 'GET' && path !== '/v1/admin/templates/preview' && !(await orgAdminWritesAllowed())) {
+    throw new ApiError(403, 'org_admin_read_only', 'Organization settings are managed by the platform super admin');
+  }
   const resource = path.split('/')[3];
   const auditWrite = (action: string, details: Record<string, unknown>) =>
     audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action, details, correlationId: cid });
@@ -438,6 +472,35 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
   const seg = path.split('/').slice(3); // [resource, id, action?]
   if (seg.length >= 2) return await adminItem(p, req, seg, b, cid, auditWrite);
   if (path.split('/').length !== 4) throw new ApiError(404, 'not_found', 'Unknown admin resource');
+
+  if (resource === 'org-preferences') {
+    if (req.method === 'POST') {
+      const items = requireArray(b.items, 'items', 50);
+      const added = await q(db.rpc('ntf_add_org_preferences', { p_tenant: p.tenantId, p_items: items, p_actor: p.actor }));
+      await auditWrite('org_preferences.add', { items, added });
+    } else if (req.method !== 'GET') throw new ApiError(405, 'method_not_allowed', 'Organization preferences are add-only');
+    const rows = await q(db.from('ntf_org_preferences').select('group_code,channel,source,created_at').eq('tenant_id', p.tenantId).order('group_code'));
+    const events = await q(db.from('ntf_events').select('module_code').eq('product_id', p.productId));
+    const channels = await q(db.from('ntf_channels').select('channel').eq('tenant_id', p.tenantId).eq('enabled', true));
+    const groups = [...new Set([...events.map((e: Body) => String(e.module_code).toUpperCase()), ...rows.map((r: Body) => r.group_code)])].sort();
+    return json({
+      groups: groups.map((g) => ({ group: g, channels: rows.filter((r: Body) => r.group_code === g).map((r: Body) => ({ channel: r.channel, source: r.source, createdAt: r.created_at })) })),
+      enabledChannels: channels.map((c: Body) => c.channel).sort()
+    }, 200, cid);
+  }
+
+  if (resource === 'org-settings') {
+    if (req.method === 'PUT') {
+      const patch: Body = {};
+      for (const k of ['inbox_retention_days', 'unread_badge', 'group_by_day', 'push_prompt', 'push_explanation', 'members_can_change']) if (k in b) patch[k] = b[k];
+      const cur = await orgSettings(p.tenantId);
+      if (!cur) await q(db.from('ntf_org_settings').insert({ tenant_id: p.tenantId, ...patch }));
+      else await q(db.from('ntf_org_settings').update(patch).eq('tenant_id', p.tenantId));
+      await auditWrite('org_settings.update', { fields: Object.keys(patch) });
+    } else if (req.method !== 'GET') throw new ApiError(405, 'method_not_allowed', 'Method not allowed');
+    const s = await orgSettings(p.tenantId);
+    return json({ managed: !!s, settings: s ?? DEFAULT_ORG_SETTINGS }, 200, cid);
+  }
 
   if (req.method === 'GET') {
     if (resource === 'templates') {
@@ -466,11 +529,16 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
   if (resource === 'channels') {
     const channel = String(b.channel ?? '').toUpperCase();
     if (!['IN_APP', 'PUSH', 'SMS', 'WHATSAPP'].includes(channel)) throw new ApiError(422, 'invalid_request', 'Unknown channel');
+    if (b.provider_config !== undefined) {
+      throw new ApiError(422, 'provider_platform_level', 'Providers are configured once for the platform (PUT /v1/platform/channels/{channel})');
+    }
+    if (b.enabled === true) {
+      const supported = await q(db.from('ntf_product_channel_defaults').select('supported').eq('product_id', p.productId).eq('channel', channel).maybeSingle());
+      if (supported && !supported.supported) throw new ApiError(422, 'channel_not_supported', `${channel} is not supported by this product`);
+    }
     const row: Body = { tenant_id: p.tenantId, channel, enabled: b.enabled === true };
-    const cfg = validateProviderConfig(channel, b.provider_config);
-    if (cfg) row.provider_config = cfg;
     await q(db.from('ntf_channels').upsert(row));
-    await auditWrite('channel.save', { channel, enabled: row.enabled, provider: cfg?.provider, secret_name: cfg?.secret_name });
+    await auditWrite('channel.save', { channel, enabled: row.enabled });
     return json({ ok: true }, 200, cid);
   }
 
@@ -490,9 +558,13 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
     await assertTemplateAllowed(p, b.template_id);
     const rule = await q(db.from('ntf_rules').select('id').eq('id', b.rule_id).eq('tenant_id', p.tenantId).maybeSingle());
     if (!rule) throw new ApiError(404, 'not_found', 'Rule not found');
+    const channel = String(b.channel ?? '').toUpperCase(), locale = b.locale ?? 'en';
+    // Without an explicit version, new bindings start on the latest published platform version.
+    const version = b.template_version ?? await q(db.rpc('ntf_latest_template_version', { p_template: b.template_id, p_channel: channel, p_locale: locale }));
+    if (!version) throw new ApiError(422, 'no_published_version', `Template has no published ${channel}/${locale} version`);
     const row = {
-      rule_id: rule.id, tenant_id: p.tenantId, channel: String(b.channel ?? '').toUpperCase(), template_id: b.template_id,
-      template_version: b.template_version, locale: b.locale ?? 'en', mappings: b.mappings ?? {}
+      rule_id: rule.id, tenant_id: p.tenantId, channel, template_id: b.template_id,
+      template_version: version, locale, mappings: b.mappings ?? {}
     };
     const saved = await q(db.from('ntf_rule_channels').upsert(row).select().single());
     await auditWrite('rule_channel.save', { rule_id: rule.id, channel: row.channel, template_id: row.template_id });
@@ -579,7 +651,13 @@ Deno.serve(async (req) => {
       if (path === '/v1/preferences' && req.method === 'POST') return await setPreferences(p, b, cid);
     }
 
+    if (path === '/v1/settings' && req.method === 'GET') {
+      if (!isEndUser(p)) forbid('A user credential is required');
+      return await memberSettings(p, cid);
+    }
+
     if (path.startsWith('/v1/admin/')) return await admin(p, req, path, b, cid);
+    if (path.startsWith('/v1/platform/')) return await platform(p, req, path, b, cid);
 
     throw new ApiError(404, 'not_found', 'Route not found');
   } catch (e) {
