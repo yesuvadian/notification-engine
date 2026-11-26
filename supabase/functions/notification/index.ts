@@ -8,6 +8,7 @@ import {
   requireArray, requireString, safeEqual, sha256Hex, toApiError, UUID_RE
 } from './http.ts';
 import { runWorker } from './worker.ts';
+import { PROVIDERS } from './adapters/index.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -167,12 +168,88 @@ async function markRead(p: Principal, ids: string[] | null, cid: string) {
   return json({ ok: true, updated: rows.length }, 200, cid);
 }
 
+// ---------------------------------------------------------------- devices and preferences
+
+const CHANNELS = ['IN_APP', 'PUSH', 'SMS', 'WHATSAPP'];
+
+async function registerDevice(p: Principal, b: Body, cid: string) {
+  const token = requireString(b.token, 'token', 4096);
+  const installationId = requireString(b.installationId, 'installationId', 200);
+  const platform = b.platform ?? null;
+  if (platform !== null && !['android', 'ios', 'web'].includes(platform)) throw new ApiError(422, 'invalid_request', 'platform must be android, ios or web');
+  const now = new Date().toISOString();
+  // A token moves with its installation; one installation belongs to one user per tenant.
+  await q(db.from('ntf_device_tokens').update({ active: false, updated_at: now }).eq('tenant_id', p.tenantId).eq('token', token).neq('installation_id', installationId));
+  await q(db.from('ntf_device_tokens').upsert({
+    tenant_id: p.tenantId, user_id: p.userId, token, installation_id: installationId, platform,
+    app_version: typeof b.appVersion === 'string' ? b.appVersion.slice(0, 50) : null, active: true, updated_at: now
+  }, { onConflict: 'tenant_id,installation_id' }));
+  // OS permission granted on the device counts as push consent, if the tenant has the PUSH channel.
+  const ch = await q(db.from('ntf_channels').select('channel').eq('tenant_id', p.tenantId).eq('channel', 'PUSH').maybeSingle());
+  if (ch) {
+    await q(db.from('ntf_preferences').upsert({ tenant_id: p.tenantId, user_id: p.userId, channel: 'PUSH', enabled: true, consent_at: now, updated_at: now },
+      { onConflict: 'tenant_id,user_id,channel' }));
+  }
+  return json({ ok: true }, 200, cid);
+}
+
+async function unregisterDevice(p: Principal, b: Body, cid: string) {
+  const installationId = requireString(b.installationId, 'installationId', 200);
+  const rows = await q(db.from('ntf_device_tokens').update({ active: false, updated_at: new Date().toISOString() })
+    .eq('tenant_id', p.tenantId).eq('user_id', p.userId!).eq('installation_id', installationId).select('id'));
+  return json({ ok: true, updated: rows.length }, 200, cid);
+}
+
+async function getPreferences(p: Principal, cid: string) {
+  const channels = await q(db.from('ntf_channels').select('channel,enabled').eq('tenant_id', p.tenantId));
+  const prefs = await q(db.from('ntf_preferences').select('channel,enabled,consent_at,locale').eq('tenant_id', p.tenantId).eq('user_id', p.userId!));
+  const byChannel = new Map(prefs.map((x: Body) => [x.channel, x]));
+  return json({
+    items: channels.filter((c: Body) => c.enabled).map((c: Body) => {
+      const x = byChannel.get(c.channel) as Body | undefined;
+      return { channel: c.channel, enabled: x?.enabled ?? true, consent: c.channel === 'IN_APP' ? true : !!x?.consent_at, consentAt: x?.consent_at ?? null };
+    })
+  }, 200, cid);
+}
+
+async function setPreferences(p: Principal, b: Body, cid: string) {
+  const items = requireArray(b.items, 'items', 10) as Body[];
+  const enabledChannels = new Set((await q(db.from('ntf_channels').select('channel').eq('tenant_id', p.tenantId).eq('enabled', true))).map((c: Body) => c.channel));
+  const now = new Date().toISOString();
+  for (const it of items) {
+    const channel = String(it.channel ?? '').toUpperCase();
+    if (!CHANNELS.includes(channel)) throw new ApiError(422, 'invalid_request', 'Unknown channel');
+    if (!enabledChannels.has(channel)) throw new ApiError(422, 'channel_disabled', `${channel} is not enabled for this organization`);
+    const row: Body = { tenant_id: p.tenantId, user_id: p.userId, channel, enabled: it.enabled !== false, updated_at: now };
+    if (typeof it.consent === 'boolean') row.consent_at = it.consent ? now : null;
+    await q(db.from('ntf_preferences').upsert(row, { onConflict: 'tenant_id,user_id,channel' }));
+  }
+  await audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action: 'preferences.update', details: { channels: items.map((i) => i.channel) }, correlationId: cid });
+  return await getPreferences(p, cid);
+}
+
+const SECRETISH = /token|secret|password|private|key|auth/i;
+
+function validateProviderConfig(channel: string, cfg: unknown): Body | undefined {
+  if (cfg === undefined) return undefined;
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || JSON.stringify(cfg).length > 4096) {
+    throw new ApiError(422, 'invalid_request', 'provider_config must be a small JSON object');
+  }
+  const c = cfg as Body;
+  const provider = String(c.provider ?? 'mock').toLowerCase();
+  if (!PROVIDERS[channel as keyof typeof PROVIDERS]?.includes(provider)) throw new ApiError(422, 'invalid_request', `Unsupported provider ${provider} for ${channel}`);
+  for (const k of Object.keys(c)) {
+    if (k !== 'secret_name' && SECRETISH.test(k)) throw new ApiError(422, 'invalid_request', `Put credentials in Vault and reference them with secret_name, not ${k}`);
+  }
+  return { ...c, provider };
+}
+
 // ---------------------------------------------------------------- admin APIs
 
 const ADMIN_TABLES: Record<string, string> = {
   events: 'ntf_events', roles: 'ntf_roles', rules: 'ntf_rules', channels: 'ntf_channels',
   overrides: 'ntf_overrides', deliveries: 'ntf_deliveries', audit: 'ntf_audit_logs',
-  'rule-channels': 'ntf_rule_channels'
+  'rule-channels': 'ntf_rule_channels', attempts: 'ntf_delivery_attempts'
 };
 
 async function allowedTemplateIds(p: Principal): Promise<string[]> {
@@ -212,7 +289,7 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
     if (!table) throw new ApiError(404, 'not_found', 'Unknown admin resource');
     let s = db.from(table).select('*');
     s = resource === 'events' ? s.eq('product_id', p.productId) : s.eq('tenant_id', p.tenantId);
-    if (resource === 'audit') s = s.order('created_at', { ascending: false });
+    if (['audit', 'attempts', 'deliveries'].includes(resource)) s = s.order('created_at', { ascending: false });
     return json(await q(s.limit(100)), 200, cid);
   }
 
@@ -222,8 +299,10 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
     const channel = String(b.channel ?? '').toUpperCase();
     if (!['IN_APP', 'PUSH', 'SMS', 'WHATSAPP'].includes(channel)) throw new ApiError(422, 'invalid_request', 'Unknown channel');
     const row: Body = { tenant_id: p.tenantId, channel, enabled: b.enabled === true };
+    const cfg = validateProviderConfig(channel, b.provider_config);
+    if (cfg) row.provider_config = cfg;
     await q(db.from('ntf_channels').upsert(row));
-    await auditWrite('channel.save', { channel, enabled: row.enabled });
+    await auditWrite('channel.save', { channel, enabled: row.enabled, provider: cfg?.provider, secret_name: cfg?.secret_name });
     return json({ ok: true }, 200, cid);
   }
 
@@ -314,6 +393,14 @@ Deno.serve(async (req) => {
         await markRead(p, [m[1]], cid);
         return json({ ok: true }, 200, cid);
       }
+    }
+
+    if (path.startsWith('/v1/devices/') || path === '/v1/preferences') {
+      if (!isEndUser(p)) forbid('A user credential is required');
+      if (path === '/v1/devices/register' && req.method === 'POST') return await registerDevice(p, b, cid);
+      if (path === '/v1/devices/unregister' && req.method === 'POST') return await unregisterDevice(p, b, cid);
+      if (path === '/v1/preferences' && req.method === 'GET') return await getPreferences(p, cid);
+      if (path === '/v1/preferences' && req.method === 'POST') return await setPreferences(p, b, cid);
     }
 
     if (path.startsWith('/v1/admin/')) return await admin(p, req, path, b, cid);

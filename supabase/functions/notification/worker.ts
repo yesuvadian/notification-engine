@@ -218,7 +218,7 @@ async function deliver(msg: QueueMsg, stats: WorkerStats) {
     });
   } catch (err) {
     const message = String((err as Error).message ?? err).slice(0, 300);
-    result = message.startsWith('unsupported provider') || message.startsWith('missing')
+    result = /^(unsupported provider|missing)|not in scope/.test(message)
       ? { outcome: 'FAILED', error: message }
       : { outcome: 'RETRY', error: message };
   }
