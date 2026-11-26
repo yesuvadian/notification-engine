@@ -22,6 +22,23 @@ jobs:
       - run: flutter analyze
       - run: flutter test
 
+  notification-admin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: notification_admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      # Integration tests skip without NTF_IT_URL (they need a local engine).
+      - run: flutter test
+
   flutter-demo:
     runs-on: ubuntu-latest
     defaults:

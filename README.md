@@ -15,11 +15,12 @@ A shared notification engine: the Supabase `ntf` schema, one Edge Function (`not
 | User APIs | Paginated inbox, unread count, mark read (one, many or all), device register/unregister, and per-channel preferences and consent. |
 | Admin | Scoped JSON admin APIs: templates, events, roles, rules, rule-channels, channels (with provider config), overrides, deliveries, attempts, and audit. Every write is audited. Also: rule update/delete (`PUT`/`DELETE /v1/admin/rules/{id}`), unbind (`DELETE /v1/admin/rule-channels/{ruleId}/{channel}`), override reset (`DELETE /v1/admin/overrides/{id}`), effective template (`GET /v1/admin/templates/{id}/effective`), event variables (`GET /v1/admin/events/{code}/variables`), delivery attempts and retry, and channel test send (`POST /v1/admin/channels/{channel}/test`). |
 | Super admin | Platform login: opaque `platform` tokens, or a JWT from `ntf_platform_issuers` sent with `X-Platform-Admin: true` (super admin by claim, e.g. `usertype = super_admin`, or by the `ntf_platform_admins` allow-list). `/v1/platform/*`: products, channel support, product tokens and issuers, organizations (created with notification preferences and member app settings), platform providers per channel with a write-only Vault secret and test send, platform templates (draft, publish, retire, usage), operations (queues, dead letters, replay) and audit. With `X-Product-Code` + `X-Organization-Id` the super admin uses every `/v1/admin/*` page for that organization, plus `org-preferences`, `org-settings` and `templates/{id}/upgrade`. Organization admins are read-only while `ntf_platform_settings.org_admin_writes` is false (default). |
+| Flutter | `flutter_sdk` 0.3.0 (additive): `memberSettings()`, locked preferences with consent only, `NotificationPreferencesPage` (C1), `NotificationInboxPage` (C2, retention and group by day), `NotificationPushHelper` (C3). `notification_admin` 0.1.0: the super admin pages as a module for the common console (`NotificationAdminModule`: products, organizations with the new-organization step, platform channels, platform templates with the designer, operations, audit, and the organization workspace with rules, templates and overrides, channels, preferences and member app settings, delivery log and audit). It only takes the signed-in super admin's token. |
 | Errors | `{error, message, correlationId}` with 400/401/403/404/409/413/422/500. `x-correlation-id` is echoed. |
 
 Breaking for organization admins: admin writes now return 403 `org_admin_read_only` until `org_admin_writes` is switched on, and `provider_config` on `POST /v1/admin/channels` returns 422 `provider_platform_level`.
 
-Not implemented yet: provider delivery webhooks (so SENT is the last state for external channels), realtime inbox (the SDK polls), quiet hours, per-tenant rate limits and quotas, scheduled sends and condition endpoints, and a visual template designer.
+Not implemented yet: provider delivery webhooks (so SENT is the last state for external channels), realtime inbox (the SDK polls), quiet hours, per-tenant rate limits and quotas, and scheduled sends and condition endpoints.
 
 Spec table names map to the physical tables like this: tables keep their `ntf.ntf_*` names, and read-only views give the spec names (`ntf.product_tenants`, `ntf.in_app_notifications`, `ntf.notification_deliveries`, `ntf.delivery_attempts`, `ntf.platform_templates`, `ntf.audit_logs`, and so on).
 
@@ -150,9 +151,11 @@ python tests/integration_providers.py         # every provider option end to end
 python tests/platform_contract.py             # super admin console: every option (same setup)
 node --test tests/parser.test.mjs && deno test -A tests/logic.test.ts tests/config.test.ts
 cd flutter_sdk && flutter pub get && flutter analyze && flutter test
+cd notification_admin && flutter pub get && flutter analyze && flutter test
+NTF_IT_URL=http://127.0.0.1:8000/ flutter test test/integration_test.dart   # against the local engine (platform token from the seed)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the Flutter SDK checks, a demo web build against the in-repo SDK, the parser and Deno tests, and a migration apply plus re-apply on a disposable Supabase Postgres.
+CI (`.github/workflows/ci.yml`) runs the Flutter SDK and notification_admin checks, a demo web build against the in-repo SDK, the parser and Deno tests, and a migration apply plus re-apply on a disposable Supabase Postgres.
 
 ## SDK releases
 

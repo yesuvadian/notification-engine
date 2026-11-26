@@ -1,0 +1,16 @@
+name: notification_admin
+description: Platform super admin pages for the notification engine (spec §51). A module for the common super admin console.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  # Same repository; works for path and git dependencies (pub resolves it relative to the repo).
+  notification_sdk:
+    path: ../flutter_sdk
+dev_dependencies:
+  flutter_test:
+    sdk: flutter

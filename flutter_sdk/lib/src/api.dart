@@ -10,6 +10,9 @@ import 'package:http/http.dart' as http;
 /// * [inboxPage], [markAllRead], [markManyRead], device registration and
 ///   preferences.
 /// * [NotificationApiException] carries the server error [NotificationApiException.code].
+///
+/// New in 0.3.0 (additive): [memberSettings], [ChannelPreference.locked],
+/// [extraHeaders] (used by the super admin console) and [NotificationApi.forOrganization].
 class NotificationApi {
   final Uri baseUrl;
   final String organizationId;
@@ -21,6 +24,9 @@ class NotificationApi {
   /// Per-request timeout.
   final Duration timeout;
 
+  /// Headers added to every request (for example `X-Platform-Admin: true` from the super admin console).
+  final Map<String, String> extraHeaders;
+
   final http.Client _client;
 
   NotificationApi({
@@ -30,6 +36,7 @@ class NotificationApi {
     http.Client? client,
     this.productCode,
     this.timeout = const Duration(seconds: 20),
+    this.extraHeaders = const {},
   }) : _client = client ?? http.Client() {
     if (baseUrl.scheme != 'https' &&
         !(baseUrl.scheme == 'http' &&
@@ -48,6 +55,7 @@ class NotificationApi {
         'Content-Type': 'application/json',
         'X-Organization-Id': organizationId,
         if (productCode != null) 'X-Product-Code': productCode!,
+        ...extraHeaders,
       });
     if (body != null) req.body = jsonEncode(body);
     final res = await http.Response.fromStream(
@@ -125,6 +133,20 @@ class NotificationApi {
         .toList();
   }
 
+  /// Organization-level settings for the member app (inbox, push prompt, whether preferences are locked).
+  Future<MemberSettings> memberSettings() async =>
+      MemberSettings.fromJson(Map<String, dynamic>.from(await request('GET', '/v1/settings')));
+
+  /// Same credentials and client, another organization (the client is shared, so close only one of them).
+  NotificationApi forOrganization(String organizationId, {String? productCode}) => NotificationApi(
+      baseUrl: baseUrl,
+      organizationId: organizationId,
+      accessToken: accessToken,
+      client: _client,
+      productCode: productCode ?? this.productCode,
+      timeout: timeout,
+      extraHeaders: extraHeaders);
+
   void close() => _client.close();
 }
 
@@ -191,10 +213,62 @@ class ChannelPreference {
   final String channel;
   final bool enabled;
   final bool consent;
-  ChannelPreference({required this.channel, required this.enabled, required this.consent});
+
+  /// True when the organization controls this channel and the member cannot switch it off.
+  final bool locked;
+  final DateTime? consentAt;
+  ChannelPreference(
+      {required this.channel, required this.enabled, required this.consent, this.locked = false, this.consentAt});
   factory ChannelPreference.fromJson(Map<String, dynamic> j) => ChannelPreference(
       channel: j['channel'] as String,
       enabled: j['enabled'] as bool? ?? true,
-      consent: j['consent'] as bool? ?? false);
-  Map<String, dynamic> toJson() => {'channel': channel, 'enabled': enabled, 'consent': consent};
+      consent: j['consent'] as bool? ?? false,
+      locked: j['locked'] as bool? ?? false,
+      consentAt: j['consentAt'] is String ? DateTime.tryParse(j['consentAt'] as String) : null);
+  ChannelPreference copyWith({bool? enabled, bool? consent}) => ChannelPreference(
+      channel: channel, enabled: enabled ?? this.enabled, consent: consent ?? this.consent, locked: locked, consentAt: consentAt);
+
+  /// Locked channels send only consent, so a member can never switch them off.
+  Map<String, dynamic> toJson() => locked ? {'channel': channel, 'consent': consent} : {'channel': channel, 'enabled': enabled, 'consent': consent};
+}
+
+/// Member app settings provisioned by the platform super admin for the organization.
+class MemberSettings {
+  /// False for organizations set up before the super admin console (members manage their own channels).
+  final bool managed;
+  final bool preferencesLocked;
+  final int? inboxRetentionDays;
+  final bool unreadBadge;
+  final bool groupByDay;
+  final bool pushEnabled;
+
+  /// `off`, `after_first_notification` or `first_login`.
+  final String pushPrompt;
+  final String? pushExplanation;
+
+  const MemberSettings({
+    this.managed = false,
+    this.preferencesLocked = false,
+    this.inboxRetentionDays,
+    this.unreadBadge = true,
+    this.groupByDay = true,
+    this.pushEnabled = false,
+    this.pushPrompt = 'off',
+    this.pushExplanation,
+  });
+
+  factory MemberSettings.fromJson(Map<String, dynamic> j) {
+    final inbox = Map<String, dynamic>.from(j['inbox'] ?? {});
+    final push = Map<String, dynamic>.from(j['push'] ?? {});
+    return MemberSettings(
+      managed: j['managed'] as bool? ?? false,
+      preferencesLocked: j['preferencesLocked'] as bool? ?? false,
+      inboxRetentionDays: (inbox['retentionDays'] as num?)?.toInt(),
+      unreadBadge: inbox['unreadBadge'] as bool? ?? true,
+      groupByDay: inbox['groupByDay'] as bool? ?? true,
+      pushEnabled: push['enabled'] as bool? ?? false,
+      pushPrompt: push['prompt'] as String? ?? 'off',
+      pushExplanation: push['explanation'] as String?,
+    );
+  }
 }
