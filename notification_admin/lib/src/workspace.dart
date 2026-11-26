@@ -81,6 +81,66 @@ class RulesData {
   }
 }
 
+/// Result of [setUpNotifications].
+class SetupResult {
+  int created = 0, skipped = 0;
+  final failed = <String>[];
+}
+
+/// The template each event would get from [setUpNotifications]: `<product>_<event>` when it has a published
+/// version on [channel]/[locale], otherwise `<product>_message`; always the latest published version.
+/// Events that already have an active rule are left out. A null value means no template is available.
+Map<String, Json?> setupPlan(RulesData d, String productCode, {String channel = 'IN_APP', String locale = 'en'}) {
+  final latest = <String, Json>{};
+  for (final v in d.templates) {
+    if (v['channel'] != channel || v['status'] != 'PUBLISHED' || (v['locale'] ?? 'en') != locale) continue;
+    final m = v['template'];
+    final code = (m is Map ? m['code'] : null)?.toString().toLowerCase();
+    if (code == null) continue;
+    if (latest[code] == null || (v['version'] as int) > (latest[code]!['version'] as int)) latest[code] = v;
+  }
+  final pc = productCode.toLowerCase();
+  final active = d.rules.where((r) => r['active'] == true).map((r) => r['event_code']).toSet();
+  final events = d.events.map((e) => e['code'] as String).toSet().where((e) => !active.contains(e)).toList()..sort();
+  return {for (final e in events) e: latest['${pc}_${e.toLowerCase()}'] ?? latest['${pc}_message']};
+}
+
+/// Sets an organization up the way a product does on its first setup: one active rule per event that has no
+/// active rule yet, bound on [channel] to the event's template at the latest published version (see [setupPlan]).
+/// After this the organization owns its copy: later platform versions reach it only through an upgrade.
+Future<SetupResult> setUpNotifications(NotificationApi org,
+    {String strategy = 'RECIPIENTS', String channel = 'IN_APP', String locale = 'en'}) async {
+  final d = await loadRules(org);
+  final r = SetupResult()..skipped = d.events.map((e) => e['code']).toSet().length;
+  final versions = <String, int>{};
+  for (final e in d.events) {
+    final v = (e['version'] as num?)?.toInt() ?? 1;
+    if (v > (versions[e['code'] as String] ?? 0)) versions[e['code'] as String] = v;
+  }
+  final plan = setupPlan(d, org.productCode ?? '', channel: channel, locale: locale);
+  r.skipped -= plan.length;
+  for (final MapEntry(key: event, value: tpl) in plan.entries) {
+    if (tpl == null) {
+      r.failed.add('$event: no published template');
+      continue;
+    }
+    try {
+      final rule = await org.createRule({
+        'event_code': event,
+        'event_version': versions[event] ?? 1,
+        'recipient_strategy': strategy,
+        'purpose': event.toLowerCase(),
+        'active': true,
+      });
+      await org.bindChannel(rule['id'] as String, channel, tpl['template_id'] as String, version: tpl['version'] as int);
+      r.created++;
+    } catch (e) {
+      r.failed.add('$event: ${errorText(e)}');
+    }
+  }
+  return r;
+}
+
 Future<RulesData> loadRules(NotificationApi org) async {
   final r = await Future.wait([
     org.adminList('rules'),
@@ -103,6 +163,12 @@ class RulesTab extends StatelessWidget {
           PageHeader('Rules',
               subtitle: 'Which event notifies whom, on which channels, with which template.',
               actions: [
+                if (setupPlan(d, org.productCode ?? '').values.any((v) => v != null))
+                  OutlinedButton.icon(
+                      key: const ValueKey('rule-setup'),
+                      onPressed: () => _setUp(context, d, reload),
+                      icon: const Icon(Icons.auto_fix_high),
+                      label: const Text('Set up notifications')),
                 FilledButton.icon(
                     key: const ValueKey('rule-new'),
                     onPressed: () => _create(context, d, reload),
@@ -113,6 +179,55 @@ class RulesTab extends StatelessWidget {
           for (final r in d.rules) _RuleCard(org: org, rule: r, data: d, reload: reload),
         ]),
       );
+
+  Future<void> _setUp(BuildContext context, RulesData d, Future<void> Function() reload) async {
+    final plan = setupPlan(d, org.productCode ?? '');
+    String strategy = 'RECIPIENTS';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, set) => AlertDialog(
+          title: const Text('Set up notifications'),
+          content: SizedBox(
+            width: 520,
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('One active in-app rule per event, on the latest published template. '
+                  'After this the organization keeps its own copy; later versions reach it only when you roll them out.'),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                key: const ValueKey('setup-strategy'),
+                initialValue: strategy,
+                decoration: const InputDecoration(labelText: 'Recipients'),
+                items: const [
+                  DropdownMenuItem(value: 'RECIPIENTS', child: Text('Users listed in the event')),
+                  DropdownMenuItem(value: 'ALL_ORG_USERS', child: Text('Everyone in the organization')),
+                ],
+                onChanged: (v) => set(() => strategy = v!),
+              ),
+              const SizedBox(height: 8),
+              for (final MapEntry(key: e, value: tpl) in plan.entries)
+                Text(tpl == null
+                    ? '$e: no published template (skipped)'
+                    : '$e → ${d.templateName(tpl['template_id'] as String)} v${tpl['version']}'),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Set up')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final r = await setUpNotifications(org, strategy: strategy);
+    if (context.mounted) {
+      toast(context,
+          '${r.created} rules created${r.skipped > 0 ? ', ${r.skipped} events already had one' : ''}'
+          '${r.failed.isEmpty ? '' : ', ${r.failed.length} failed (${r.failed.first})'}');
+    }
+    await reload();
+  }
 
   Future<void> _create(BuildContext context, RulesData d, Future<void> Function() reload) async {
     final events = d.events.map((e) => e['code'] as String).toSet().toList()..sort();

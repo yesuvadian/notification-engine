@@ -698,7 +698,13 @@ class _PlatformTemplatesPageState extends State<PlatformTemplatesPage> {
                   'existing organizations keep theirs until you upgrade them from the organization workspace.',
               actions: [FilledButton.icon(onPressed: create, icon: const Icon(Icons.add), label: const Text('New template'))]),
           for (final t in rows)
-            _TemplateCard(api: widget.api, t: t, productCode: widget.productCode, onOpen: () => openDesigner(t), reload: reload),
+            _TemplateCard(
+                api: widget.api,
+                t: t,
+                productCode: widget.productCode,
+                copied: t['product_id'] == null && rows.any((o) => o['product_id'] != null && o['code'] == t['code']),
+                onOpen: () => openDesigner(t),
+                reload: reload),
         ]),
       );
 }
@@ -707,9 +713,27 @@ class _TemplateCard extends StatelessWidget {
   final NotificationPlatformApi api;
   final Json t;
   final String? productCode;
+  final bool copied;
   final VoidCallback onOpen;
   final Future<void> Function() reload;
-  const _TemplateCard({required this.api, required this.t, this.productCode, required this.onOpen, required this.reload});
+  const _TemplateCard(
+      {required this.api, required this.t, this.productCode, this.copied = false, required this.onOpen, required this.reload});
+
+  /// Copies this shared template into [productCode]; from then on the product owns its copy.
+  Future<void> _copy(BuildContext context) async {
+    final pc = productCode!;
+    if (!await confirm(context,
+        title: 'Copy ${t['code']} to $pc?',
+        message: 'Makes a $pc template with the content of v${t['latestPublished']}, published as v1. '
+            'From then on $pc owns the copy: later changes to the shared template do not reach it.',
+        action: 'Copy')) {
+      return;
+    }
+    if (context.mounted &&
+        await runAction(context, () => copyTemplateToProduct(api, t, pc), done: '${t['code']} copied to $pc')) {
+      await reload();
+    }
+  }
 
   /// Moves every organization of [productCode] that uses this template to version [v] (overrides carried).
   Future<void> _rollOut(BuildContext context, int v) async {
@@ -750,6 +774,14 @@ class _TemplateCard extends StatelessWidget {
             Expanded(child: Text('${t['code']}', style: Theme.of(context).textTheme.titleMedium)),
             Text(t['product_id'] == null ? 'Shared' : 'Product only', style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(width: 8),
+            if (productCode != null && t['product_id'] == null && t['latestPublished'] != null) ...[
+              if (copied)
+                Text('Copied to $productCode', key: ValueKey('copied-${t['code']}'), style: Theme.of(context).textTheme.bodySmall)
+              else
+                OutlinedButton(
+                    key: ValueKey('copy-${t['code']}'), onPressed: () => _copy(context), child: Text('Copy to $productCode')),
+              const SizedBox(width: 8),
+            ],
             if (productCode != null && t['latestPublished'] != null) ...[
               OutlinedButton(
                 key: ValueKey('rollout-${t['code']}'),
@@ -796,6 +828,28 @@ class _TemplateCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Copies the latest published version of a shared template into [productCode] as a product-owned
+/// template (same code, every channel and locale of that version), published as v1. Returns the new template.
+Future<Json> copyTemplateToProduct(NotificationPlatformApi api, Json template, String productCode) async {
+  final latest = template['latestPublished'];
+  if (latest == null) throw StateError('${template['code']} has no published version to copy');
+  final rows = (template['versions'] as List? ?? [])
+      .map((v) => Map<String, dynamic>.from(v as Map))
+      .where((v) => v['version'] == latest && v['status'] == 'PUBLISHED')
+      .toList();
+  final copy = await api.createTemplate(template['code'] as String, (template['name'] ?? template['code']).toString(),
+      productCode: productCode, description: 'Copied from the shared template ${template['code']} v$latest');
+  final id = copy['id'] as String;
+  int? version;
+  for (final v in rows) {
+    final saved = await api.saveDraft(id, v['channel'] as String, Map<String, dynamic>.from(v['content'] as Map? ?? {}),
+        locale: (v['locale'] ?? 'en') as String);
+    version ??= saved['version'] as int?;
+  }
+  if (version != null) await api.publishVersion(id, version);
+  return copy;
 }
 
 /// Result of [rollOutTemplate].

@@ -51,6 +51,98 @@ void main() {
     }
   });
 
+  group('B2 Set up notifications (copy model)', () {
+    const cmmVersions = [
+      {'template_id': 'msg', 'version': 1, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_message', 'name': 'CMM message'}},
+      {'template_id': 'msg', 'version': 3, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_message', 'name': 'CMM message'}},
+      {'template_id': 'due', 'version': 1, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_upkeep_task_due', 'name': 'Upkeep due'}},
+      {'template_id': 'due', 'version': 2, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_upkeep_task_due', 'name': 'Upkeep due'}},
+      {'template_id': 'due', 'version': 4, 'channel': 'IN_APP', 'locale': 'en', 'status': 'DRAFT', 'template': {'code': 'cmm_upkeep_task_due', 'name': 'Upkeep due'}},
+      {'template_id': 'due', 'version': 5, 'channel': 'SMS', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_upkeep_task_due', 'name': 'Upkeep due'}},
+    ];
+    Map<String, dynamic Function(dynamic)> routes({List<Map<String, dynamic>> rules = const [], List<Map<String, dynamic>> tpls = cmmVersions}) => {
+          'GET /v1/admin/rules': (_) => rules,
+          'GET /v1/admin/rule-channels': (_) => [],
+          'GET /v1/admin/events': (_) => [
+                {'code': 'UPKEEP_TASK_DUE', 'version': 1},
+                {'code': 'VISITOR_BLOCKED', 'version': 1},
+                {'code': 'VISITOR_BLOCKED', 'version': 2},
+                {'code': 'VISITOR_OVERSTAY', 'version': 1},
+              ],
+          'GET /v1/admin/templates': (_) => tpls,
+          'GET /v1/admin/channels': (_) => [{'channel': 'IN_APP', 'enabled': true}],
+        };
+    NotificationApi cmmOrg(FakeEngine f) => platformFor(f).organization('cmm', 'soc1');
+
+    testWidgets('creates one active rule per event on its own template at the latest version', (t) async {
+      await big(t);
+      var n = 0;
+      final f = FakeEngine({
+        ...routes(rules: [{'id': 'old', 'event_code': 'VISITOR_OVERSTAY', 'active': true}]),
+        'POST /v1/admin/rules': (_) => {'id': 'r${++n}'},
+        'POST /v1/admin/rule-channels': (_) => {'ok': true},
+      });
+      await t.pumpWidget(host(RulesTab(org: cmmOrg(f))));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const ValueKey('rule-setup')));
+      await t.pumpAndSettle();
+      expect(find.text('UPKEEP_TASK_DUE → Upkeep due v2'), findsOneWidget);
+      expect(find.text('VISITOR_BLOCKED → CMM message v3'), findsOneWidget);
+      expect(find.descendant(of: find.byType(AlertDialog), matching: find.textContaining('VISITOR_OVERSTAY')), findsNothing);
+      await tapText(t, 'Set up');
+      expect(f.bodies('POST /v1/admin/rules'), [
+        {'event_code': 'UPKEEP_TASK_DUE', 'event_version': 1, 'recipient_strategy': 'RECIPIENTS', 'purpose': 'upkeep_task_due', 'active': true},
+        {'event_code': 'VISITOR_BLOCKED', 'event_version': 2, 'recipient_strategy': 'RECIPIENTS', 'purpose': 'visitor_blocked', 'active': true},
+      ]);
+      expect(f.bodies('POST /v1/admin/rule-channels'), [
+        {'rule_id': 'r1', 'channel': 'IN_APP', 'template_id': 'due', 'template_version': 2},
+        {'rule_id': 'r2', 'channel': 'IN_APP', 'template_id': 'msg', 'template_version': 3},
+      ]);
+      expect(find.text('2 rules created, 1 events already had one'), findsOneWidget);
+      for (final c in f.calls) {
+        expect(c.headers['X-Organization-Id'], 'soc1');
+        expect(c.headers['X-Product-Code'], 'cmm');
+      }
+    });
+
+    testWidgets('recipients can be everyone in the organization', (t) async {
+      await big(t);
+      final f = FakeEngine({...routes(), 'POST /v1/admin/rules': (_) => {'id': 'r'}, 'POST /v1/admin/rule-channels': (_) => {}});
+      await t.pumpWidget(host(RulesTab(org: cmmOrg(f))));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const ValueKey('rule-setup')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const ValueKey('setup-strategy')));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Everyone in the organization').last);
+      await t.pumpAndSettle();
+      await tapText(t, 'Set up');
+      expect(f.bodies('POST /v1/admin/rules').map((b) => b['recipient_strategy']).toSet(), {'ALL_ORG_USERS'});
+    });
+
+    testWidgets('no button when every event already has an active rule, or no template is published', (t) async {
+      await big(t);
+      final all = [for (final e in ['UPKEEP_TASK_DUE', 'VISITOR_BLOCKED', 'VISITOR_OVERSTAY']) {'id': e, 'event_code': e, 'active': true}];
+      await t.pumpWidget(host(RulesTab(org: cmmOrg(FakeEngine(routes(rules: all))))));
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('rule-setup')), findsNothing);
+      await t.pumpWidget(host(RulesTab(key: const ValueKey('b'), org: cmmOrg(FakeEngine(routes(tpls: const []))))));
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('rule-setup')), findsNothing);
+    });
+
+    test('events without any template are reported, the rest still set up; failures are collected', () async {
+      final f = FakeEngine({
+        ...routes(tpls: [cmmVersions[2]]),
+        'POST /v1/admin/rules': (_) => {'id': 'r1'},
+        'POST /v1/admin/rule-channels': (_) => err(409, 'conflict', 'Template not available'),
+      });
+      final r = await setUpNotifications(cmmOrg(f));
+      expect(r.created, 0);
+      expect(r.failed, ['UPKEEP_TASK_DUE: Template not available', 'VISITOR_BLOCKED: no published template', 'VISITOR_OVERSTAY: no published template']);
+    });
+  });
+
   group('B2 Rules', () {
     testWidgets('creates a rule for a role, off by default', (t) async {
       await big(t);

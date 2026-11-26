@@ -423,12 +423,55 @@ void main() {
       expect(find.textContaining('v2: 2 organizations, 4 rule channels moved, 2 overrides carried, 1 failed (Hill Top: Template not used)'), findsOneWidget);
     });
 
+    testWidgets('a shared template is copied to the product, which then owns it', (t) async {
+      await big(t);
+      final shared = {
+        ...tpl(),
+        'name': 'Rent due',
+        'versions': [
+          {'version': 1, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'content': {'title': 'old'}},
+          {'version': 2, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'content': {'title': 'Rent', 'body': 'Due {{data.date}}'}},
+          {'version': 2, 'channel': 'SMS', 'locale': 'ta', 'status': 'PUBLISHED', 'content': {'body': 'Vaadagai'}},
+          {'version': 3, 'channel': 'IN_APP', 'locale': 'en', 'status': 'DRAFT', 'content': {'title': 'draft'}},
+        ],
+      };
+      var copied = false;
+      final f = FakeEngine({
+        'GET /v1/platform/templates': (_) => [
+              shared,
+              if (copied) {'id': 'c1', 'code': 'RENT_DUE', 'product_id': 'p-cmm', 'latestPublished': 1, 'organizationsWithOverrides': 0, 'versions': []},
+            ],
+        'POST /v1/platform/templates/c1/versions': (_) => {'version': 1},
+        'POST /v1/platform/templates/c1/versions/1/publish': (_) => {'ok': true},
+        'POST /v1/platform/templates': (_) {
+          copied = true;
+          return {'id': 'c1', 'code': 'RENT_DUE'};
+        },
+      });
+      await t.pumpWidget(host(PlatformTemplatesPage(api: platformFor(f), productCode: 'cmm')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const ValueKey('copy-RENT_DUE')));
+      await t.pumpAndSettle();
+      expect(find.textContaining('cmm owns the copy'), findsOneWidget);
+      await tapText(t, 'Copy');
+      expect(f.bodies('POST /v1/platform/templates').single,
+          {'code': 'RENT_DUE', 'name': 'Rent due', 'productCode': 'cmm', 'description': 'Copied from the shared template RENT_DUE v2'});
+      expect(f.bodies('POST /v1/platform/templates/c1/versions'), [
+        {'channel': 'IN_APP', 'locale': 'en', 'content': {'title': 'Rent', 'body': 'Due {{data.date}}'}},
+        {'channel': 'SMS', 'locale': 'ta', 'content': {'body': 'Vaadagai'}},
+      ]);
+      expect(f.hits('POST /v1/platform/templates/c1/versions/1/publish'), hasLength(1));
+      expect(find.byKey(const ValueKey('copy-RENT_DUE')), findsNothing);
+      expect(find.text('Copied to cmm'), findsOneWidget);
+    });
+
     testWidgets('no roll-out button on the engine-wide page (no product)', (t) async {
       await big(t);
       final f = FakeEngine({'GET /v1/platform/templates': (_) => [tpl()]});
       await t.pumpWidget(host(PlatformTemplatesPage(api: platformFor(f))));
       await t.pumpAndSettle();
       expect(find.byKey(const ValueKey('rollout-RENT_DUE')), findsNothing);
+      expect(find.byKey(const ValueKey('copy-RENT_DUE')), findsNothing);
     });
   });
 

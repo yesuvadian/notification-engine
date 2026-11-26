@@ -89,6 +89,26 @@ void main() {
     expect((await org.adminList('rules')).map((r) => r['id']), isNot(contains(rule['id'])));
   }, skip: skip);
 
+  test('copy model: a shared template copied to the product, then set up in the organization', () async {
+    final code = 'IT_COPY_${orgId.substring(0, 8).toUpperCase()}';
+    final shared = await api.createTemplate(code, 'IT copy');
+    await api.saveDraft(shared['id'] as String, 'IN_APP', {'title': 'Hi', 'body': '{{data.body}}'});
+    await api.publishVersion(shared['id'] as String, 1);
+    final listed = (await api.templates(productCode: product)).firstWhere((t) => t['id'] == shared['id']);
+    final copy = await copyTemplateToProduct(api, listed, product);
+    final mine = (await api.templates(productCode: product)).firstWhere((t) => t['id'] == copy['id']);
+    expect(mine['product_id'], isNotNull);
+    expect(mine['latestPublished'], 1);
+    expect((mine['versions'] as List).single['content'], {'title': 'Hi', 'body': '{{data.body}}'});
+
+    // Set up: every event without an active rule gets one, bound at the latest published version.
+    final before = await loadRules(org);
+    final r = await setUpNotifications(org, strategy: 'ALL_ORG_USERS');
+    expect(r.created + r.failed.length, setupPlan(before, product).length);
+    final after = await loadRules(org);
+    expect(setupPlan(after, product).values.where((v) => v != null), isEmpty);
+  }, skip: skip);
+
   test('suspend needs a reason, then reactivate; both are audited', () async {
     await expectStatus(() => api.setOrganizationActive(product, orgId, false), 422);
     await api.setOrganizationActive(product, orgId, false, reason: 'integration test');
