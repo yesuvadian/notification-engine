@@ -1,7 +1,8 @@
 import json, urllib.request, uuid, os
+org=os.getenv('NOTIFICATION_ORG_ID','20000000-0000-0000-0000-000000000001')
 base=os.getenv('NOTIFICATION_BASE_URL','http://127.0.0.1:54321/functions/v1/notification/v1').rstrip('/')
 def call(path,token,body=None):
-    req=urllib.request.Request(base+path, data=None if body is None else json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+    req=urllib.request.Request(base+path, data=None if body is None else json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','X-Organization-Id':org})
     with urllib.request.urlopen(req,timeout=60) as r:return json.load(r)
 e={'eventCode':'APPROVED','triggerType':'WORKFLOW_TRANSITION','idempotencyKey':str(uuid.uuid4()),'data':{'reference':'PR-TEST'}}
 a=call('/events/publish',os.getenv('NOTIFICATION_SERVICE_TOKEN','local-service-only'),e);assert a==call('/events/publish',os.getenv('NOTIFICATION_SERVICE_TOKEN','local-service-only'),e)
