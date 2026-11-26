@@ -1,0 +1,14 @@
+name: notification_demo
+publish_to: none
+version: 1.0.0+1
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  notification_sdk:
+    path: ../flutter_sdk
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/config.json

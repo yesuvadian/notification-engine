@@ -1,0 +1,13 @@
+project_id = "notification-platform"
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public", "ntf"]
+[db]
+port = 54322
+major_version = 15
+[studio]
+enabled = true
+port = 54323
+[functions.notification]
+verify_jwt = false
