@@ -2,9 +2,14 @@
 -- delivery attempts, and a pg_cron schedule that invokes the worker through pg_net.
 -- Safe on existing DEV data: legacy ntf_jobs is kept; pending EVENT jobs are moved onto the event queue.
 -- Requires the pgmq, pg_cron and pg_net extensions (Dashboard -> Database -> Extensions if CREATE EXTENSION is refused).
-create extension if not exists pgmq;
-create extension if not exists pg_net with schema extensions;
-create extension if not exists pg_cron;
+-- Create only when missing: on Supabase, CREATE EXTENSION ... IF NOT EXISTS still fires the platform's grant
+-- event triggers, which fail with 2BP01 "dependent privileges exist" when pg_cron is already installed and
+-- postgres has granted cron.job privileges to other roles.
+do $$ begin
+  if not exists (select 1 from pg_extension where extname = 'pgmq') then create extension pgmq; end if;
+  if not exists (select 1 from pg_extension where extname = 'pg_net') then create extension pg_net with schema extensions; end if;
+  if not exists (select 1 from pg_extension where extname = 'pg_cron') then create extension pg_cron; end if;
+end $$;
 
 begin;
 set local search_path = ntf, public;
