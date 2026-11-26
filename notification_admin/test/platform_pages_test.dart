@@ -482,6 +482,15 @@ void main() {
   });
 
   group('Module', () {
+    test('canAdminister is false for 401/403 and rethrows other errors', () async {
+      for (final s in [401, 403]) {
+        final m = NotificationAdminModule(api: platformFor(FakeEngine({'GET /v1/platform/overview': (_) => err(s, 'forbidden', 'no')})), productCode: 'ass');
+        expect(await m.canAdminister(), isFalse);
+      }
+      final m = NotificationAdminModule(api: platformFor(FakeEngine({'GET /v1/platform/overview': (_) => err(500, 'internal', 'boom')})), productCode: 'ass');
+      await expectLater(m.canAdminister(), throwsA(isA<Object>()));
+    });
+
     testWidgets('menu builds every page and the overview card counts queues', (t) async {
       await big(t);
       final f = FakeEngine({
@@ -495,7 +504,10 @@ void main() {
             },
       });
       final m = NotificationAdminModule(api: platformFor(f), productCode: 'ass');
-      expect(m.menu.map((e) => e.label), ['Organizations', 'Products', 'Channels', 'Templates', 'Operations', 'Audit']);
+      expect(m.productMenu.map((e) => e.label), ['Organizations']);
+      expect(m.engineMenu.map((e) => e.label), ['Products', 'Channels', 'Templates', 'Operations', 'Audit']);
+      expect(m.menu, hasLength(6));
+      expect(await t.runAsync(m.canAdminister), isTrue);
       await t.pumpWidget(host(m.overviewCard()));
       await t.pumpAndSettle();
       expect(t.widget<Text>(find.byKey(const ValueKey('ov-Organizations'))).data, '17');

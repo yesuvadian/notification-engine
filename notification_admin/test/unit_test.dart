@@ -1,5 +1,7 @@
 // Unit tests: platform client headers and routes, organization client, preview rendering, setup JSON, helpers.
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:notification_admin/notification_admin.dart';
 import 'package:notification_sdk/notification_sdk.dart';
 
@@ -63,6 +65,19 @@ void main() {
       });
       expect(b['settings']['push_prompt'], 'off');
     });
+  });
+
+  test('network failures say the engine could not be reached', () async {
+    final api = NotificationPlatformApi(
+        baseUrl: Uri.parse('https://x.test/'),
+        accessToken: () async => 't',
+        client: MockClient((_) async => throw http.ClientException('XMLHttpRequest error.')));
+    try {
+      await api.products();
+      fail('expected an error');
+    } catch (e) {
+      expect(errorText(e), startsWith('Could not reach the notification engine'));
+    }
   });
 
   group('renderPreview', () {

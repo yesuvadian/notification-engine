@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:notification_sdk/notification_sdk.dart';
 
 import 'common.dart';
 import 'platform_api.dart';
@@ -39,17 +40,34 @@ class NotificationAdminModule {
           productCode: productCode,
           onOpenOrganization: onOpenOrganization);
 
-  /// Menu pages (D1-D7) in the order the mockups show them.
-  List<NotificationMenuItem> get menu => [
+  /// Pages for one product's organizations (shown inside that product in the console).
+  List<NotificationMenuItem> get productMenu => [
         NotificationMenuItem('ntf-organizations', 'Organizations', Icons.apartment,
             (_) => OrganizationsPage(api: api, productCode: productCode, onOpen: onOpenOrganization)),
+      ];
+
+  /// Engine-wide pages (shown under the console's own "Notification Engine" entry, not inside a product).
+  List<NotificationMenuItem> get engineMenu => [
         NotificationMenuItem('ntf-products', 'Products', Icons.widgets_outlined, (_) => ProductsPage(api: api)),
         NotificationMenuItem('ntf-channels', 'Channels', Icons.cell_tower, (_) => PlatformChannelsPage(api: api)),
-        NotificationMenuItem('ntf-templates', 'Templates', Icons.article_outlined,
-            (_) => PlatformTemplatesPage(api: api, productCode: productCode)),
+        NotificationMenuItem('ntf-templates', 'Templates', Icons.article_outlined, (_) => PlatformTemplatesPage(api: api)),
         NotificationMenuItem('ntf-operations', 'Operations', Icons.monitor_heart_outlined, (_) => OperationsPage(api: api)),
         NotificationMenuItem('ntf-audit', 'Audit', Icons.history, (_) => PlatformAuditPage(api: api)),
       ];
+
+  /// Every page (product pages first).
+  List<NotificationMenuItem> get menu => [...productMenu, ...engineMenu];
+
+  /// True when the signed-in user is a platform super admin of the engine (401/403 means not).
+  Future<bool> canAdminister() async {
+    try {
+      await api.overview();
+      return true;
+    } on NotificationApiException catch (e) {
+      if (e.status == 401 || e.status == 403) return false;
+      rethrow;
+    }
+  }
 
   /// The "Notifications" tab inside the console's organization workspace.
   Widget organizationTab(String organizationId, String organizationName) => OrganizationWorkspace(

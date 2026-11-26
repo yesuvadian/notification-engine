@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:notification_sdk/notification_sdk.dart';
 
 const kChannels = ['IN_APP', 'SMS', 'WHATSAPP', 'PUSH'];
@@ -9,6 +12,11 @@ String chLabel(String c) => const {'IN_APP': 'In-app', 'SMS': 'SMS', 'WHATSAPP':
 /// Message for a failed request, using the engine's error message when there is one.
 String errorText(Object e) {
   if (e is NotificationApiException) return e.message ?? 'Request failed (${e.status}${e.code == null ? '' : ' ${e.code}'})';
+  // No HTTP response at all: network down, wrong engine URL, or (on web) a CORS refusal from an engine that
+  // does not have the platform API deployed yet (it does not allow the X-Platform-Admin header).
+  if (e is http.ClientException || e is TimeoutException) {
+    return 'Could not reach the notification engine. Check the engine URL and that the latest notification function is deployed.';
+  }
   return 'Request failed';
 }
 
