@@ -7,7 +7,7 @@ import {
   ApiError, corsHeaders, decodeCursor, encodeCursor, errorResponse, json, normalizePath, randomToken,
   requireArray, requireString, safeEqual, sha256Hex, toApiError, UUID_RE
 } from './http.ts';
-import { processEventJob } from './worker.ts';
+import { runWorker } from './worker.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -265,25 +265,6 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
   throw new ApiError(405, 'method_not_allowed', 'This resource is read-only');
 }
 
-// ---------------------------------------------------------------- worker
-
-async function runWorker(cid: string) {
-  await q(db.rpc('ntf_reap_jobs'));
-  const jobs = await q(db.rpc('ntf_claim_jobs', { p_limit: 10 }));
-  let failed = 0;
-  for (const j of jobs) {
-    try {
-      await processEventJob(j);
-      await q(db.rpc('ntf_finish_job', { p_id: j.id, p_token: j.lease_token, p_success: true }));
-    } catch (e) {
-      failed++;
-      console.error('NTF Worker Error:', String(e));
-      await q(db.rpc('ntf_finish_job', { p_id: j.id, p_token: j.lease_token, p_success: false, p_error: 'processing failed' }));
-    }
-  }
-  return json({ processed: jobs.length, failed }, 200, cid);
-}
-
 // ---------------------------------------------------------------- router
 
 Deno.serve(async (req) => {
@@ -302,7 +283,9 @@ Deno.serve(async (req) => {
       const expected = Deno.env.get('WORKER_TOKEN');
       if (!token) throw new ApiError(401, 'unauthorized', 'Missing bearer token');
       if (!expected || !safeEqual(token, expected)) throw new ApiError(403, 'forbidden', 'Worker credential required');
-      return await runWorker(cid);
+      const stats = await runWorker(Number(Deno.env.get('WORKER_BUDGET_MS') ?? 45000));
+      // `processed` kept for 0.1.x callers (number of events expanded in this run).
+      return json({ processed: stats.events.processed, ...stats }, 200, cid);
     }
     if (path === '/v1/tenants/provision' && req.method === 'POST') return await provisionTenant(req, b, cid);
 
