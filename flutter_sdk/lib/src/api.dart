@@ -1,32 +1,200 @@
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
+
+/// Client for the notification engine API.
+///
+/// 0.1.x usage keeps working unchanged. New in 0.2.0 (all additive):
+/// * [productCode]: send `X-Product-Code`, required when [accessToken] returns a
+///   Supabase/OIDC JWT instead of an engine token.
+/// * [inboxPage], [markAllRead], [markManyRead], device registration and
+///   preferences.
+/// * [NotificationApiException] carries the server error [NotificationApiException.code].
 class NotificationApi {
   final Uri baseUrl;
   final String organizationId;
   final Future<String> Function() accessToken;
+
+  /// Product code registered in the engine. Required with JWT authentication.
+  final String? productCode;
+
+  /// Per-request timeout.
+  final Duration timeout;
+
   final http.Client _client;
-  NotificationApi({required this.baseUrl, required this.organizationId, required this.accessToken, http.Client? client}): _client=client??http.Client() {
-    if(baseUrl.scheme!='https' && !(baseUrl.scheme=='http' && ['localhost','127.0.0.1','10.0.2.2'].contains(baseUrl.host))) throw ArgumentError('HTTPS required');
+
+  NotificationApi({
+    required this.baseUrl,
+    required this.organizationId,
+    required this.accessToken,
+    http.Client? client,
+    this.productCode,
+    this.timeout = const Duration(seconds: 20),
+  }) : _client = client ?? http.Client() {
+    if (baseUrl.scheme != 'https' &&
+        !(baseUrl.scheme == 'http' &&
+            ['localhost', '127.0.0.1', '10.0.2.2'].contains(baseUrl.host))) {
+      throw ArgumentError('HTTPS required');
+    }
   }
-  Future<dynamic> request(String method,String path,{Map<String,dynamic>? body}) async {
-    final uri=baseUrl.resolve(path.replaceFirst(RegExp(r'^/'), ''));
-    if(uri.origin!=baseUrl.origin) throw ArgumentError('Invalid endpoint');
-    final req=http.Request(method,uri)..headers.addAll({'Authorization':'Bearer ${await accessToken()}','Content-Type':'application/json','X-Organization-Id':organizationId});
-    if(body!=null) req.body=jsonEncode(body);
-    final res=await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds:20))).timeout(const Duration(seconds:20));
-    if(res.statusCode<200||res.statusCode>=300) throw NotificationApiException(res.statusCode);
-    return res.body.isEmpty?null:jsonDecode(res.body);
+
+  Future<dynamic> request(String method, String path,
+      {Map<String, dynamic>? body}) async {
+    final uri = baseUrl.resolve(path.replaceFirst(RegExp(r'^/'), ''));
+    if (uri.origin != baseUrl.origin) throw ArgumentError('Invalid endpoint');
+    final req = http.Request(method, uri)
+      ..headers.addAll({
+        'Authorization': 'Bearer ${await accessToken()}',
+        'Content-Type': 'application/json',
+        'X-Organization-Id': organizationId,
+        if (productCode != null) 'X-Product-Code': productCode!,
+      });
+    if (body != null) req.body = jsonEncode(body);
+    final res = await http.Response.fromStream(
+            await _client.send(req).timeout(timeout))
+        .timeout(timeout);
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw NotificationApiException.fromResponse(res.statusCode, res.body);
+    }
+    return res.body.isEmpty ? null : jsonDecode(res.body);
   }
-  Future<List<NotificationItem>> inbox() async {
-    final data=await request('GET','/v1/notifications');
-    return (data['items'] as List).map((x)=>NotificationItem.fromJson(Map<String,dynamic>.from(x))).toList();
+
+  /// Newest notifications first. [limit] defaults to the server default (50).
+  Future<List<NotificationItem>> inbox({int? limit, bool unreadOnly = false}) async =>
+      (await inboxPage(limit: limit, unreadOnly: unreadOnly)).items;
+
+  /// One page of the inbox; pass [NotificationPage.nextCursor] as [cursor] for the next page.
+  Future<NotificationPage> inboxPage(
+      {int? limit, String? cursor, bool unreadOnly = false}) async {
+    final query = <String, String>{
+      if (limit != null) 'limit': '$limit',
+      if (cursor != null) 'before': cursor,
+      if (unreadOnly) 'unread': 'true',
+    };
+    final path = Uri(path: 'v1/notifications', queryParameters: query.isEmpty ? null : query).toString();
+    return NotificationPage.fromJson(Map<String, dynamic>.from(await request('GET', path)));
   }
-  Future<void> markRead(String id) async {await request('POST','/v1/notifications/${Uri.encodeComponent(id)}/read');}
-  Future<int> unreadCount() async => (await request('GET','/v1/notifications/unread-count'))['count'] as int;
-  void close()=>_client.close();
+
+  Future<void> markRead(String id) async {
+    await request('POST', '/v1/notifications/${Uri.encodeComponent(id)}/read');
+  }
+
+  /// Marks the given notifications read; returns how many changed.
+  Future<int> markManyRead(List<String> ids) async =>
+      ((await request('POST', '/v1/notifications/mark-read', body: {'ids': ids}))['updated'] as num?)?.toInt() ?? 0;
+
+  /// Marks the whole inbox read; returns how many changed.
+  Future<int> markAllRead() async =>
+      ((await request('POST', '/v1/notifications/mark-read', body: {'all': true}))['updated'] as num?)?.toInt() ?? 0;
+
+  Future<int> unreadCount() async =>
+      (await request('GET', '/v1/notifications/unread-count'))['count'] as int;
+
+  /// Registers this installation's FCM token for push (call after the OS permission is granted).
+  Future<void> registerDevice(
+      {required String token,
+      required String installationId,
+      String? platform,
+      String? appVersion}) async {
+    await request('POST', '/v1/devices/register', body: {
+      'token': token,
+      'installationId': installationId,
+      if (platform != null) 'platform': platform,
+      if (appVersion != null) 'appVersion': appVersion,
+    });
+  }
+
+  /// Call on logout or tenant switch.
+  Future<void> unregisterDevice(String installationId) async {
+    await request('POST', '/v1/devices/unregister', body: {'installationId': installationId});
+  }
+
+  /// Channels enabled for the organization with the user's choice and consent.
+  Future<List<ChannelPreference>> preferences() async {
+    final data = await request('GET', '/v1/preferences');
+    return (data['items'] as List)
+        .map((x) => ChannelPreference.fromJson(Map<String, dynamic>.from(x)))
+        .toList();
+  }
+
+  Future<List<ChannelPreference>> setPreferences(List<ChannelPreference> items) async {
+    final data = await request('POST', '/v1/preferences',
+        body: {'items': items.map((e) => e.toJson()).toList()});
+    return (data['items'] as List)
+        .map((x) => ChannelPreference.fromJson(Map<String, dynamic>.from(x)))
+        .toList();
+  }
+
+  void close() => _client.close();
 }
-class NotificationApiException implements Exception {final int status; NotificationApiException(this.status); @override String toString()=> 'Notification request failed ($status)';}
+
+class NotificationApiException implements Exception {
+  final int status;
+
+  /// Server error code such as `unauthorized`, `organization_required`, `idempotency_conflict`.
+  final String? code;
+  final String? message;
+  final String? correlationId;
+
+  NotificationApiException(this.status, {this.code, this.message, this.correlationId});
+
+  factory NotificationApiException.fromResponse(int status, String body) {
+    try {
+      final j = jsonDecode(body);
+      if (j is Map) {
+        return NotificationApiException(status,
+            code: j['error'] is String ? j['error'] as String : null,
+            message: j['message'] is String ? j['message'] as String : null,
+            correlationId: j['correlationId'] is String ? j['correlationId'] as String : null);
+      }
+    } catch (_) {}
+    return NotificationApiException(status);
+  }
+
+  @override
+  String toString() => code == null
+      ? 'Notification request failed ($status)'
+      : 'Notification request failed ($status $code)';
+}
+
 class NotificationItem {
-  final String id,title,body; final bool read; final Map<String,dynamic> design; final Map<String,dynamic>? action;
-  NotificationItem.fromJson(Map<String,dynamic> j):id=j['id'] as String,title=j['title'] as String,body=j['body'] as String,read=j['read_at']!=null,design=Map<String,dynamic>.from(j['design']??{}),action=j['action']==null?null:Map<String,dynamic>.from(j['action']);
+  final String id, title, body;
+  final bool read;
+  final Map<String, dynamic> design;
+  final Map<String, dynamic>? action;
+  final DateTime? createdAt;
+  final String? purpose;
+
+  NotificationItem.fromJson(Map<String, dynamic> j)
+      : id = j['id'] as String,
+        title = j['title'] as String,
+        body = j['body'] as String,
+        read = j['read_at'] != null,
+        design = Map<String, dynamic>.from(j['design'] ?? {}),
+        action = j['action'] == null ? null : Map<String, dynamic>.from(j['action']),
+        createdAt = j['created_at'] is String ? DateTime.tryParse(j['created_at'] as String) : null,
+        purpose = j['purpose'] as String?;
+}
+
+class NotificationPage {
+  final List<NotificationItem> items;
+  final String? nextCursor;
+  NotificationPage(this.items, this.nextCursor);
+  factory NotificationPage.fromJson(Map<String, dynamic> j) => NotificationPage(
+      (j['items'] as List)
+          .map((x) => NotificationItem.fromJson(Map<String, dynamic>.from(x)))
+          .toList(),
+      j['nextCursor'] as String?);
+}
+
+class ChannelPreference {
+  final String channel;
+  final bool enabled;
+  final bool consent;
+  ChannelPreference({required this.channel, required this.enabled, required this.consent});
+  factory ChannelPreference.fromJson(Map<String, dynamic> j) => ChannelPreference(
+      channel: j['channel'] as String,
+      enabled: j['enabled'] as bool? ?? true,
+      consent: j['consent'] as bool? ?? false);
+  Map<String, dynamic> toJson() => {'channel': channel, 'enabled': enabled, 'consent': consent};
 }

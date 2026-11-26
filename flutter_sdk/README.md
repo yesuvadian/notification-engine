@@ -1,8 +1,52 @@
-# Flutter notification SDK starter
-Run flutter pub get, flutter analyze and flutter test in a Flutter environment. This package was not compiled here (Flutter/Dart unavailable).
+# notification_sdk (Flutter)
 
-Integrate NotificationApi with HTTPS central API URL, current organization and short-lived token callback. Use NotificationInbox and NotificationBell in the host UI; NotificationAdmin is a basic JSON editor for authorized product admins, not the full visual designer. On logout or tenant switch unmount all notification widgets, close the old API client and create a new one. Host navigation callback must allowlist routes and reauthorize record access.
+Inbox, unread badge, push registration, preferences and a JSON admin console for the shared notification engine.
 
-Proposed API contract (backend not included): GET /v1/notifications -> {items:[{id,title,body,read_at,design,action}]}; GET /v1/notifications/unread-count -> {count:int}; POST /v1/notifications/{id}/read; GET /v1/admin/{templates,events,roles,rules,channels,overrides,deliveries,audit}; POST /v1/admin/{rules,channels,overrides}; POST /v1/admin/templates/preview. All require bearer token and validated tenant scope. Admin payload schemas must be finalized with backend. Polling badge is included; realtime, Firebase setup, permission flows, preferences UI, pagination, dynamic design rendering and full visual admin screens are future work. No provider credentials belong in Flutter.
+## Install (pinned release tag)
 
-Private Git distribution: commit package to private repository and pin a release tag in host pubspec.yaml. See architecture specification for remaining scope.
+```yaml
+dependencies:
+  notification_sdk:
+    git:
+      url: https://github.com/yesuvadian/notification-engine.git   # or git@github.com:yesuvadian/notification-engine.git
+      path: flutter_sdk
+      ref: v0.2.0          # release tag (or a commit SHA); avoid `main` in products
+```
+
+Run `flutter pub get`, then commit your app's `pubspec.lock` (it must show `source: git` and a resolved commit). Tags are immutable: to upgrade, change `ref` to a newer tag. See `CHANGELOG.md`.
+
+## Create the client
+
+Option A: same Supabase project as the engine (for example CMM). Use the Supabase session JWT and your product code:
+
+```dart
+final api = NotificationApi(
+  baseUrl: Uri.parse('https://<ref>.supabase.co/functions/v1/notification/'), // trailing slash required
+  organizationId: currentOrgId,
+  productCode: 'cmm',
+  accessToken: () async => Supabase.instance.client.auth.currentSession!.accessToken,
+);
+```
+
+The engine verifies the JWT with Supabase Auth. The user must have been synced to that organization (`POST /v1/users/sync` from your backend), and the product's issuer must be registered (see the root README).
+
+Option B: other backends. Your backend calls `POST /v1/auth/exchange` with its service credential and returns the short-lived engine token to the app. Pass it through `accessToken`, and leave `productCode` unset.
+
+Never put service, product or worker tokens in Flutter.
+
+## Widgets and calls
+
+- `NotificationBell(api:, onPressed:)` polls the unread count every 30 seconds.
+- `NotificationInbox(api:, onAction:)` lists notifications and marks them read on tap. The host must allowlist routes in `onAction` and re-authorize record access.
+- `NotificationAdmin(api:)` is a JSON console for users with a notification-admin role.
+- `api.inboxPage()`, `api.markAllRead()`, `api.unreadCount()`.
+- `api.registerDevice(token: fcmToken, installationId: id, platform: 'android')` after the OS permission is granted. Call `unregisterDevice` on logout.
+- `api.preferences()` and `api.setPreferences([...])` read and set per-channel opt-in and consent.
+
+On logout or tenant switch, unmount the notification widgets, call `close()` on the old client, and create a new one.
+
+Errors throw `NotificationApiException(status, code, message, correlationId)`.
+
+## Develop
+
+`flutter pub get && flutter analyze && flutter test`

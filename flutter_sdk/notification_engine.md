@@ -951,10 +951,8 @@ Version APIs and event schemas independently; prefer additive changes, publish d
 Backend independence is the requested architecture direction. Python/TypeScript SDK interfaces, endpoint names, token exchange, repository split and reference rollout are proposed designs, not implemented packages. Outstanding decisions: actual FastAPI authentication and database transaction capabilities, identity issuer trust, membership freshness/revocation SLA, service credential mechanism, API version support window, provider selection and performance targets. No integration, security or load tests have been executed. Existing earlier revisions are retained for traceability; sections 30–45 take precedence over conflicting earlier examples.
 
 ## Shared DEV database naming (authoritative)
-All 21 engine tables use `ntf.ntf_*`; all four engine RPCs and explicit indexes use `ntf_`. Product tables are not referenced or altered. Keep the dedicated `ntf` schema; expose it in Supabase Data API settings alongside existing schemas, not instead of them. Only service_role has schema access; browser clients use the Edge Function.
-For a fresh installation, run the three migrations in order in SQL Editor. Do not reset the shared database. The existing `notification` schema is left untouched. This is a fresh installation into `ntf`, not a data migration. If `ntf` already exists, inspect it before running migrations. Do not drop the old schema or product tables.
-For cloud DEV use `supabase/seed_cloud_dev.sql` optionally, once, instead of `seed.sql`. It returns random short-lived demo tokens; save them securely. Set WORKER_TOKEN in Edge Function secrets to the returned worker token. Deploy notification function with JWT gateway verification disabled (the function validates its own opaque tokens); never expose service role key. Use NOTIFICATION_BASE_URL (ending /v1), NOTIFICATION_SERVICE_TOKEN, NOTIFICATION_WORKER_TOKEN and NOTIFICATION_USER_TOKEN for smoke.py. Keep this demo restricted to DEV. Existing production limitations still apply.
-
+Engine tables keep the `ntf.ntf_*` prefix, and RPCs and indexes use `ntf_`. Spec names from section 5 are provided as read-only `security_invoker` views in the same schema (`ntf.product_tenants`, `ntf.in_app_notifications`, `ntf.notification_events`, `ntf.platform_templates`, `ntf.tenant_template_overrides`, `ntf.tenant_notification_channels`, `ntf.notification_rules`, `ntf.notification_deliveries`, `ntf.delivery_attempts`, `ntf.device_tokens`, `ntf.user_notification_preferences`, `ntf.audit_logs`). Product tables are not referenced or altered. Keep the dedicated `ntf` schema exposed alongside the existing Data API schemas. Only service_role has schema, table and function access, and browser clients use the Edge Function. Queues live in pgmq (`ntf_events`, `ntf_deliveries`, `ntf_dlq`). Worker and provider credentials live in Vault.
+Migrations are applied in filename order and never edited after being applied. `20260101000001`–`03` are the baseline. `20261126000001`–`03` are additive and idempotent upgrades (auth and isolation, pgmq worker, channel providers). Do not reset the shared database. The old `notification` schema is left untouched. Use `supabase/seed_cloud_dev.sql` once at most on hosted DEV, and `seed.sql` only locally. The README has the exact upgrade, Vault and deployment commands.
 
 ## 46. DEV deployment and verification update — 26 November 2026
 
@@ -968,9 +966,11 @@ This section supersedes historical implementation-status statements, not the tar
 | Admin authentication and template retrieval | Passed in user environment |
 | Inbox and bell UI | Loaded; inbox empty |
 | Admin modules | Visible: templates, events, roles, rules, channels, overrides, deliveries, audit |
-| Dynamic rendering, event publishing, worker, mark-as-read | Pending end-to-end verification |
-| Git-based SDK installation and CI | Pending |
-| Cross-tenant isolation, production security and real external delivery | Pending |
+| Engine 0.2.0 (section 50): auth adapters, isolation, pgmq worker, provider adapters | Implemented. Verified on a local Supabase Postgres 15.8 image with PostgREST: 30 API contract checks, smoke test, fake-provider adapter tests, cron → Vault → worker invocation. Not yet deployed to hosted DEV |
+| Dynamic rendering, event publishing, worker, mark-as-read on hosted DEV | Pending until 0.2.0 is deployed (section 48) |
+| Git-based SDK installation | Repository exists (github.com/yesuvadian/notification-engine); flutter_demo consumes `flutter_sdk` from Git; tag pinning pending (47.2) |
+| CI | Workflow committed (section 49); first run pending |
+| Real external delivery, provider webhooks, load and security tests | Pending |
 
 The published IN_APP template has ID `40000000-0000-0000-0000-000000000001`, version 1, locale `en`, title `Purchase update`, and body `Hello {{recipient.name}}, record {{data.reference}} was updated.`
 
@@ -980,11 +980,11 @@ The published IN_APP template has ID `40000000-0000-0000-0000-000000000001`, ver
 - Invalid schema: expose `ntf` alongside existing Data API schemas; retain service-role access and avoid direct browser database access.
 - Custom authentication 401: fresh short-lived scoped tokens were generated.
 - HTTP 404 `not found or forbidden`: runtime logs confirmed correct normalized path `/v1/notifications/unread-count` but scope `admin`. Re-entering freshly generated user/admin tokens resolved the connection. The exact original copying mistake was not independently established. Do not weaken scope checks.
-- The deployed function was updated with path normalization and routing/authentication diagnostics. The archived function predates that edit; export/reconcile the deployed source before treating Git as authoritative. Never log raw tokens. Consider separate 403 and 404 responses in a future API revision.
+- The deployed function was updated with path normalization and routing/authentication diagnostics. The archived function predates that edit; export/reconcile the deployed source before treating Git as authoritative. Never log raw tokens. Engine 0.2.0 returns distinct 401 (credential), 403 (scope or membership), 404 (route or record) and 422 (validation) responses with an error code and correlation id.
 
 ## 47. Private GitHub repository and SDK integration
 
-Proposed initial layout: one private monorepo, using the contents of the `platform/` directory from `notification_platform_ntf_schema.zip` as repository root and adding `flutter_demo/` from `notification_flutter_demo.zip`. Both archives were inspected; the actual GitHub repository has not yet been created or verified. The actual SDK package name is `notification_sdk`, version `0.1.0`.
+Proposed initial layout: one private monorepo, using the contents of the `platform/` directory from `notification_platform_ntf_schema.zip` as repository root and adding `flutter_demo/` from `notification_flutter_demo.zip`. The repository now exists at `github.com/yesuvadian/notification-engine` with this layout, and is the source of truth for the deployed function and migrations. The SDK package is `notification_sdk`, version `0.2.0` (additive over `0.1.0`, see `flutter_sdk/CHANGELOG.md`).
 
 ```text
 notification-engine/
@@ -1066,7 +1066,16 @@ flutter pub deps
 flutter run -d chrome
 ```
 
-Inspect `pubspec.lock`: `notification_sdk` must have `source: git`, the expected URL/path, and a resolved commit. Commit the application lockfile for reproducibility. After validating the SDK, tag the tested commit (for example `v0.1.0`) and use that tag or a commit SHA in consuming products instead of a moving branch. Do not claim the tag exists until it is pushed.
+Inspect `pubspec.lock`: `notification_sdk` must have `source: git`, the expected URL/path, and a resolved commit. Commit the application lockfile for reproducibility.
+
+Release tags: `v0.1.0` marks the original DEV baseline. After 0.2.0 passes section 48 on hosted DEV, tag that commit `v0.2.0`. Products pin `ref: v0.2.0` (or a commit SHA), never `main`:
+
+```powershell
+git tag -a v0.2.0 -m "notification_sdk 0.2.0 / engine 0.2.0" <tested-commit>
+git push origin v0.2.0
+```
+
+Tags are immutable. Fixes ship as new tags (`v0.2.1`). Do not claim a tag exists until it is pushed. The SDK's public API stays backward compatible within 0.x minor releases unless the changelog says otherwise.
 
 ### 47.3 Connect and verify
 
@@ -1086,14 +1095,32 @@ $service = Read-Host 'Service token' -MaskInput
 $worker = Read-Host 'Worker token' -MaskInput
 $event = @{eventCode='APPROVED';triggerType='WORKFLOW_TRANSITION';schemaVersion=1;idempotencyKey=[guid]::NewGuid().ToString();data=@{reference='PR-1001'}} | ConvertTo-Json -Depth 5
 Invoke-RestMethod -Method Post -Uri "$base/events/publish" -Headers @{Authorization="Bearer $service"} -ContentType 'application/json' -Body $event
-Invoke-RestMethod -Method Post -Uri "$base/worker" -Headers @{Authorization="Bearer $worker"} -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod -Method Post -Uri "$base/worker" -Headers @{Authorization="Bearer $worker"} -ContentType 'application/json' -Body '{}'   # optional with 0.2.0: pg_cron runs it every minute
 Remove-Variable service,worker
 ```
 
-Refresh Flutter inbox. Expected title: `Purchase update`; body: `Hello Demo User, record PR-1001 was updated.` Verify unread count increases relative to baseline, click the notification, and verify the count decreases. Replay the same event payload with the same idempotency key to test duplicate prevention. Worker claimed count alone is not proof of successful delivery. If empty, inspect jobs, deliveries and runtime logs without exposing credentials. Do not reset the database.
+Refresh Flutter inbox. Expected title: `Purchase update`; body: `Hello Demo User, record PR-1001 was updated.` Verify unread count increases relative to baseline, click the notification, and verify the count decreases. Replay the same event payload with the same idempotency key to test duplicate prevention. Worker counts alone are not proof of successful delivery. If empty, inspect `ntf.ntf_queue_metrics()`, `ntf_event_log.status/last_error`, deliveries, `ntf_delivery_attempts`, `cron.job_run_details` and runtime logs without exposing credentials. Replaying the same key with a different payload must return 409. Since 0.2.0, user and admin requests must send `X-Organization-Id` (the SDK does). Do not reset the database.
 
-## 49. CI and release gates (proposed)
+## 49. CI and release gates
 
-Start with GitHub Actions checks for pull requests and main: install a pinned compatible Flutter SDK, run `flutter pub get`, `flutter analyze`, `flutter test` in flutter_sdk; build the demo web app; run `node --test tests/parser.test.mjs` with Node 22. Private Git dependency access in CI requires an explicitly configured read-only deploy key or other approved scoped credential; do not assume the default workflow token can authenticate SSH. Keep cloud smoke tests manual or in a protected DEV environment with scoped, rotated secrets. The archive contains a Python smoke script; review its environment variables and assertions before execution. No workflow has been installed or run yet.
+Start with GitHub Actions checks for pull requests and main: install a pinned compatible Flutter SDK, run `flutter pub get`, `flutter analyze`, `flutter test` in flutter_sdk; build the demo web app; run `node --test tests/parser.test.mjs` with Node 22. Private Git dependency access in CI requires an explicitly configured read-only deploy key or other approved scoped credential; do not assume the default workflow token can authenticate SSH. Keep cloud smoke tests manual or in a protected DEV environment with scoped, rotated secrets. The archive contains a Python smoke script; review its environment variables and assertions before execution. `.github/workflows/ci.yml` implements these checks, plus Deno type-check and unit tests for the Edge Function, a demo build against the in-repo SDK (via `pubspec_overrides.yaml`, so no deploy key is needed), and an apply-and-re-apply run of all migrations on a disposable `supabase/postgres` image. It has not run on GitHub yet.
 
-Production gates remain: tenant isolation and scope rejection, reliable outbox and worker retry behavior, identity lifecycle, token exchange/revocation, provider integration, consent, callbacks, monitoring and load/security tests. External delivery in the baseline is mocked; ACCEPTED is not proof of actual SMS or WhatsApp delivery. Push, realtime and automatic scheduling are not implemented in this baseline. The admin UI is a JSON-based DEV console, not a finished production designer. The target channel matrix in section 1 remains unchanged.
+Production gates remain: tenant isolation and scope rejection, reliable outbox and worker retry behavior, identity lifecycle, token exchange/revocation, provider integration, consent, callbacks, monitoring and load/security tests. Channels without a configured provider remain mocked (ACCEPTED is not proof of delivery). Realtime is not implemented. The admin UI is a JSON-based DEV console, not a finished production designer. The target channel matrix in section 1 remains unchanged.
+
+## 50. Engine 0.2.0 implementation (26 November 2026)
+
+This section records what the code in the repository implements. Sections 1–45 remain the target architecture.
+
+| Spec area | Implementation |
+|---|---|
+| §11, §40 authentication | Opaque scoped tokens (`service` per tenant, `product` per product with `X-Organization-Id` selecting the tenant, `admin`, `user`), stored as SHA-256 hashes with expiry and revocation. JWT adapter: `X-Product-Code` plus a trusted issuer in `ntf_identity_issuers`. With `jwks_url` NULL the token is verified by this project's Supabase Auth (shared-project products such as CMM). Otherwise it is verified against the JWKS for issuer, audience and expiry. `user_id_claim` defaults to `sub`. JWT users must be synced, active members of the tenant. Admin rights come from roles flagged `notification_admin`. `POST /v1/auth/exchange` mints short-lived user/admin tokens for other backends. |
+| §40, §42 identity and lifecycle | `POST /v1/tenants/provision` (product credential, idempotent), `/v1/users/sync` (upsert, deactivate, replace memberships), `/v1/roles/sync` (deactivate, never delete), `/v1/metadata/sync` (versioned event contracts; changing an existing version returns 409). |
+| §5, §21 isolation | Templates have `product_id` (NULL = shared master library). Admin template listing, rule-channel binding and overrides are limited to shared or own-product templates, enforced by the API and by DB triggers. `X-Organization-Id` is required for user and admin credentials and must match. |
+| §26, §40 ingestion | `ntf_accept_event_v2` stores the event with a payload hash and enqueues on pgmq atomically. Identical retries return the original id (`Idempotent-Replayed: true`). A different payload with the same key returns 409. |
+| §8, §26 worker | `ntf_events` (one message per event) is expanded with batched recipient, preference and template resolution. IN_APP is persisted as DELIVERED. One `ntf_deliveries` message per external delivery is enqueued exactly once (`enqueued_at`). Deliveries recheck tenant, channel, membership, consent and expiry, call the adapter, record `ntf_delivery_attempts`, retry with exponential backoff, jitter and Retry-After via the visibility timeout, and dead-letter to `ntf_dlq` after `max_attempts`. Render errors are counted and audited, not retried. pg_cron (`ntf-worker`, every minute) calls the worker through pg_net, with URL and token in Vault. Pending legacy `ntf_jobs` were moved to the queue, and `ntf_jobs` is retained. |
+| §8 channel adapters | Twilio and MSG91 (SMS), Meta WhatsApp Cloud API (approved templates), and FCM HTTP v1 (service-account OAuth, invalid tokens deactivated). Credentials are Vault secrets named `ntf_t_<tenant>_*`, `ntf_p_<product>_*` or `ntf_shared_*`, referenced by `provider_config.secret_name`, and scope-checked in the API and the DB. |
+| §24 devices and consent | `POST /v1/devices/register|unregister` (registration records PUSH consent if the tenant has the PUSH channel), `GET/POST /v1/preferences`. |
+| §40 errors and observability | Error envelope `{error, message, correlationId}`. Status codes 400, 401, 403, 404, 405, 409, 413, 422 and 500. Body limit 256 KB. Audit log for admin writes, syncs, exchanges, provisioning and preference changes. `ntf_queue_metrics()`. `GET /v1/health`. |
+| §47.2 SDK | `notification_sdk` 0.2.0 is additive: `productCode`, `inboxPage`, `markAllRead`, `markManyRead`, devices, preferences, and error codes on `NotificationApiException`. Pin by release tag. |
+
+Still open: provider delivery webhooks (signature verification, out-of-order status), realtime inbox, quiet hours, per-tenant quotas and rate limits, scheduled sends and condition endpoints, template designer and full lifecycle (draft/publish APIs), retention jobs for notifications, and load and security tests on hosted DEV.

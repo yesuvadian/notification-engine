@@ -113,6 +113,44 @@ async function syncRoles(p: Principal, b: Body, cid: string) {
   return json(r, 200, cid);
 }
 
+async function syncMetadata(p: Principal, b: Body, cid: string) {
+  if (!isServer(p)) forbid();
+  const events = requireArray(b.events, 'events', 200) as Body[];
+  const TRIGGERS = ['WORKFLOW_TRANSITION', 'STATUS_CHANGE', 'ACTION', 'RECORD_CREATED', 'RECORD_UPDATED', 'ASSIGNMENT', 'SCHEDULED', 'MANUAL', 'SYSTEM_EVENT'];
+  let created = 0, unchanged = 0;
+  for (const ev of events) {
+    const code = requireString(ev.code, 'events[].code', 100);
+    const version = ev.version ?? 1;
+    if (!Number.isInteger(version) || version < 1) throw new ApiError(422, 'invalid_request', `${code}: version must be a positive integer`);
+    if (!TRIGGERS.includes(ev.triggerType)) throw new ApiError(422, 'invalid_request', `${code}: unknown triggerType`);
+    if (!ev.payloadSchema || typeof ev.payloadSchema !== 'object') throw new ApiError(422, 'invalid_request', `${code}: payloadSchema required`);
+    try {
+      ajv.compile(ev.payloadSchema);
+    } catch {
+      throw new ApiError(422, 'invalid_request', `${code}: payloadSchema is not a valid JSON schema`);
+    }
+    const row = {
+      product_id: p.productId, code, version, module_code: requireString(ev.moduleCode, 'events[].moduleCode', 100),
+      trigger_type: ev.triggerType, payload_schema: ev.payloadSchema, metadata: ev.metadata ?? {}
+    };
+    const existing = await q(db.from('ntf_events').select('*').eq('product_id', p.productId).eq('code', code).eq('version', version).maybeSingle());
+    if (existing) {
+      const same = existing.module_code === row.module_code && existing.trigger_type === row.trigger_type &&
+        JSON.stringify(existing.payload_schema) === JSON.stringify(row.payload_schema);
+      if (!same) throw new ApiError(409, 'version_conflict', `${code} v${version} already exists with a different contract; publish a new version`);
+      if (JSON.stringify(existing.metadata) !== JSON.stringify(row.metadata)) {
+        await q(db.from('ntf_events').update({ metadata: row.metadata }).eq('product_id', p.productId).eq('code', code).eq('version', version));
+      }
+      unchanged++;
+    } else {
+      await q(db.from('ntf_events').insert(row));
+      created++;
+    }
+  }
+  await audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action: 'metadata.sync', details: { created, unchanged }, correlationId: cid });
+  return json({ created, unchanged }, 200, cid);
+}
+
 async function provisionTenant(req: Request, b: Body, cid: string) {
   // Needs a product-level credential; the organization comes from the body (it may not exist yet).
   const token = (req.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
@@ -376,6 +414,7 @@ Deno.serve(async (req) => {
       if (path === '/v1/auth/exchange') return await exchangeToken(p, b, cid);
       if (path === '/v1/users/sync') return await syncUsers(p, b, cid);
       if (path === '/v1/roles/sync') return await syncRoles(p, b, cid);
+      if (path === '/v1/metadata/sync') return await syncMetadata(p, b, cid);
     }
 
     if (path.startsWith('/v1/notifications')) {
