@@ -110,6 +110,11 @@ s,b,_=call('POST','/metadata/sync',S,{'events':[evv]}); check('A metadata same c
 s,b,_=call('GET','/admin/events/%s/variables?version=1'%code2,A,org=ORG); vs={v['path']:v for v in b.get('variables',[])} if s==200 else {}
 check('A variables carry source',vs.get('data.subject',{}).get('source')=='platform' and vs.get('data.contract_field',{}).get('source')=='product' and 'organization.name' in vs,(s,b))
 
+s,b,_=call('POST','/admin/rules',P,{'event_code':code2,'event_version':1,'active':False,'recipient_strategy':'ALL_ORG_USERS','purpose':'contract'},org=ORG); rid=b.get('id') if s in (200,201) else None
+s,b,_=call('POST','/metadata/sync',S,{'events':[dict(evv,version=2)]}); check('A metadata v2 same fields',s==200 and b['created']==1,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'event_version':2},org=ORG); check('A rule moves to event v2',s==200 and b.get('event_version')==2,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'event_version':9},org=ORG); check('A rule to unknown event version 422',s==422,(s,b))
+
 if FAILED:
     sys.exit('%d checks failed' % len(FAILED))
 print('All contract checks passed')

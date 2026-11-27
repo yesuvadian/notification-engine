@@ -403,6 +403,13 @@ async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid
     const patch: Body = {};
     for (const k of ['active', 'conditions', 'recipient_strategy', 'role_code', 'priority', 'purpose', 'schedule_config']) if (k in b) patch[k] = b[k];
     if ('active' in patch && typeof patch.active !== 'boolean') throw new ApiError(422, 'invalid_request', 'active must be boolean');
+    // Moving a rule to a newer event version keeps its channels, pinned templates and overrides.
+    if ('event_version' in b) {
+      if (!Number.isInteger(b.event_version) || b.event_version < 1) throw new ApiError(422, 'invalid_request', 'event_version must be a positive integer');
+      const ev = await q(db.from('ntf_events').select('code').eq('product_id', p.productId).eq('code', rule.event_code).eq('version', b.event_version).maybeSingle());
+      if (!ev) throw new ApiError(422, 'invalid_request', `${rule.event_code} v${b.event_version} is not registered`);
+      patch.event_version = b.event_version;
+    }
     const saved = await q(db.from('ntf_rules').update(patch).eq('id', id).eq('tenant_id', p.tenantId).select().single());
     await auditWrite('rule.update', { id, fields: Object.keys(patch) });
     return json(saved, 200, cid);
