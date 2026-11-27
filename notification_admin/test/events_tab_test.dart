@@ -15,7 +15,17 @@ const tpls = [
   {'template_id': 'msg', 'version': 1, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_message', 'name': 'CMM message'}},
 ];
 
-Map<String, dynamic> dueRule({String strategy = 'RECIPIENTS', String? role, List<String>? roles, bool active = true}) => {
+Map<String, dynamic> dueRule({
+  String strategy = 'RECIPIENTS',
+  String? role,
+  List<String>? roles,
+  List<String>? attributes,
+  List<String>? phones,
+  bool active = true,
+}) =>
+    {
+      if (attributes != null) 'attribute_codes': attributes,
+      if (phones != null) 'custom_phones': phones,
       'id': 'r1',
       'event_code': 'UPKEEP_TASK_DUE',
       'event_version': 2,
@@ -41,7 +51,17 @@ FakeEngine engine({
       'GET /v1/admin/rule-channels': (_) => bindings ?? [{'rule_id': 'r1', 'channel': 'IN_APP', 'template_id': 'due', 'template_version': 1}],
       'GET /v1/admin/events': (_) => [
             {'code': 'UPKEEP_TASK_DUE', 'version': 1, 'module_code': 'UPKEEP'},
-            {'code': 'UPKEEP_TASK_DUE', 'version': 2, 'module_code': 'UPKEEP'},
+            {
+              'code': 'UPKEEP_TASK_DUE',
+              'version': 2,
+              'module_code': 'UPKEEP',
+              'metadata': {
+                'recipientAttributes': [
+                  {'code': 'record_creator', 'label': 'Task creator'},
+                  {'code': 'task_starter', 'label': 'Task starter'},
+                ],
+              },
+            },
             {'code': 'VISITOR_BLOCKED', 'version': 2, 'module_code': 'VISITORS'},
           ],
       'GET /v1/admin/templates': (_) => tpls,
@@ -155,6 +175,81 @@ void main() {
     await t.pumpAndSettle();
     expect(f.hits('PUT /v1/admin/rules/r1'), isEmpty);
     expect(find.textContaining('Keep at least one role'), findsOneWidget);
+  });
+
+  test('typed numbers become E.164 like the engine does', () {
+    expect(normalizePhone('98765 43210'), '+919876543210');
+    expect(normalizePhone('098765-43210'), '+919876543210');
+    expect(normalizePhone('91 9876543210'), '+919876543210');
+    expect(normalizePhone('+1 (415) 555-0100'), '+14155550100');
+    expect(normalizePhone('12345'), isNull);
+    expect(normalizePhone('5876543210'), isNull);
+  });
+
+  testWidgets('also notify: people linked to the record are offered per event and saved', (t) async {
+    final f = await pumpTab(t, engine());
+    expect(find.text('Also notify'), findsOneWidget);
+    expect(find.byKey(const ValueKey('attr-r1-record_creator')), findsOneWidget);
+    expect(find.byKey(const ValueKey('attr-r1-task_starter')), findsOneWidget);
+    expect(find.byKey(const ValueKey('attr-r1-flat_owner')), findsNothing);
+    await t.tap(find.byKey(const ValueKey('attr-r1-record_creator')));
+    await t.pumpAndSettle();
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'attribute_codes': ['record_creator']});
+  });
+
+  testWidgets('also notify: unticking a person keeps the others', (t) async {
+    final f = await pumpTab(t, engine(rules: [dueRule(attributes: ['record_creator', 'task_starter'])]));
+    expect(t.widget<FilterChip>(find.byKey(const ValueKey('attr-r1-task_starter'))).selected, isTrue);
+    await t.tap(find.byKey(const ValueKey('attr-r1-task_starter')));
+    await t.pumpAndSettle();
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'attribute_codes': ['record_creator']});
+  });
+
+  testWidgets('also notify: a typed number is added as E.164; a bad one is refused', (t) async {
+    final f = await pumpTab(t, engine());
+    await t.enterText(find.byKey(const ValueKey('phone-input-r1')), '12345');
+    await t.tap(find.byKey(const ValueKey('phone-add-r1')));
+    await t.pumpAndSettle();
+    expect(f.hits('PUT /v1/admin/rules/r1'), isEmpty);
+    expect(find.textContaining('Enter a phone number'), findsOneWidget);
+    await t.enterText(find.byKey(const ValueKey('phone-input-r1')), '98765 43210');
+    await t.tap(find.byKey(const ValueKey('phone-add-r1')));
+    await t.pumpAndSettle();
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'custom_phones': ['+919876543210']});
+  });
+
+  testWidgets('also notify: a listed number can be removed, and a duplicate is not added twice', (t) async {
+    final f = await pumpTab(t, engine(rules: [dueRule(phones: ['+919876543210', '+14155550100'])]));
+    expect(find.byKey(const ValueKey('phone-r1-+919876543210')), findsOneWidget);
+    await t.enterText(find.byKey(const ValueKey('phone-input-r1')), '9876543210');
+    await t.tap(find.byKey(const ValueKey('phone-add-r1')));
+    await t.pumpAndSettle();
+    expect(f.hits('PUT /v1/admin/rules/r1'), isEmpty);
+    expect(find.textContaining('already on the list'), findsOneWidget);
+    await t.tap(find.descendant(
+      of: find.byKey(const ValueKey('phone-r1-+919876543210')),
+      matching: find.byIcon(Icons.cancel),
+    ));
+    await t.pumpAndSettle();
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'custom_phones': ['+14155550100']});
+  });
+
+  testWidgets('"Only the people chosen below" turns the product recipients off', (t) async {
+    final f = await pumpTab(t, engine());
+    await t.tap(find.byKey(const ValueKey('who-r1')));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Only the people chosen below').last);
+    await t.pumpAndSettle();
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'recipient_strategy': 'NONE'});
+  });
+
+  testWidgets('the card summary lists the extra people and numbers', (t) async {
+    await big(t);
+    final f = engine(rules: [dueRule(attributes: ['record_creator'], phones: ['+919876543210'])]);
+    await t.pumpWidget(host(EventsTab(org: cmmOrg(f), organizationName: 'Hittop')));
+    await t.pumpAndSettle();
+    final summary = find.byKey(const ValueKey('event-summary-UPKEEP_TASK_DUE'));
+    expect(find.descendant(of: summary, matching: find.text('Decided by CMM + Task creator + 1 number')), findsOneWidget);
   });
 
   testWidgets('a removed role is flagged on the rule', (t) async {

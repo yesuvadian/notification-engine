@@ -67,6 +67,12 @@ s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_codes':['manager','ntfadmin','ma
 s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_codes':['manager','no-such-role']},org=ORG); check('A rule unknown role 422',s==422 and b.get('error')=='unknown_role',(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_codes':'manager'},org=ORG); check('A rule role_codes not a list 422',s==422,(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_code':'manager'},org=ORG); check('A rule single role_code still works',s==200 and b.get('role_codes')==['manager'],(s,b))
+# Record people the product sends (attribute_codes) and numbers listed by the admin (custom_phones).
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'attribute_codes':['flat_owner','record_creator']},org=ORG); check('A rule record people',s==200 and b.get('attribute_codes')==['flat_owner','record_creator'],(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'attribute_codes':['Flat Owner']},org=ORG); check('A rule bad attribute 422',s==422,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'custom_phones':['98765 43210','+919876543210']},org=ORG); check('A rule custom numbers normalized',s==200 and b.get('custom_phones')==['+919876543210'],(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'custom_phones':['12345']},org=ORG); check('A rule bad number 422',s==422,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'attribute_codes':[],'custom_phones':[]},org=ORG); check('A rule extras cleared',s==200 and b.get('attribute_codes')==[] and b.get('custom_phones')==[],(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%uuid.uuid4(),P,{'active':True},org=ORG); check('A rule update unknown 404',s==404,(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%rid,U,{'active':True},org=ORG); check('A rule update by user 403',s==403,(s,b))
 TPL='40000000-0000-0000-0000-000000000001'

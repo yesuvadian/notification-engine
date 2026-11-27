@@ -11,7 +11,7 @@ import { runWorker } from './worker.ts';
 import { platform } from './platform.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel } from './adapters/types.ts';
-import { eventVariables, jsonEqual, roleFields, VARIABLE_NAME_RE, VARIABLE_TYPES, VariableDef, variableIssues } from './logic.ts';
+import { attributeFields, eventVariables, jsonEqual, phoneFields, phoneUserId, roleFields, VARIABLE_NAME_RE, VARIABLE_TYPES, VariableDef, variableIssues } from './logic.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -114,6 +114,27 @@ async function ruleRoles(tenantId: string, b: Body) {
     if (missing.length) throw new ApiError(422, 'unknown_role', `Not a role of this organization: ${missing.join(', ')}`);
   }
   return f;
+}
+
+/**
+ * attribute_codes / custom_phones from a rule body (null fields when not given). Each listed number gets an
+ * engine user "phone:<number>" so its deliveries can be recorded; listing it is the admin's consent record.
+ */
+async function ruleExtras(tenantId: string, b: Body): Promise<Body> {
+  let attributes: { attribute_codes: string[] } | null, phones: { custom_phones: string[] } | null;
+  try {
+    attributes = attributeFields(b);
+    phones = phoneFields(b);
+  } catch (e) {
+    throw new ApiError(422, 'invalid_request', (e as Error).message);
+  }
+  if (phones?.custom_phones.length) {
+    await q(db.rpc('ntf_sync_users', {
+      p_tenant: tenantId,
+      p_users: phones.custom_phones.map((phone) => ({ userId: phoneUserId(phone), displayName: phone, phone, active: true })),
+    }));
+  }
+  return { ...(attributes ?? {}), ...(phones ?? {}) };
 }
 
 async function syncUsers(p: Principal, b: Body, cid: string) {
@@ -421,6 +442,8 @@ async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid
     // One or several roles ("Everyone with a role"): role_codes, or the older single role_code.
     const roles = await ruleRoles(p.tenantId, b);
     if (roles) Object.assign(patch, roles);
+    // Record people (flat owner, task creator...) and numbers listed by the admin.
+    Object.assign(patch, await ruleExtras(p.tenantId, b));
     if ('active' in patch && typeof patch.active !== 'boolean') throw new ApiError(422, 'invalid_request', 'active must be boolean');
     // Moving a rule to a newer event version keeps its channels, pinned templates and overrides.
     if ('event_version' in b) {
@@ -626,6 +649,7 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
       event_version: b.event_version ?? 1, active: b.active === true, conditions: b.conditions ?? {},
       recipient_strategy: requireString(b.recipient_strategy, 'recipient_strategy', 100),
       ...((await ruleRoles(p.tenantId, b)) ?? { role_code: null, role_codes: [] }),
+      ...(await ruleExtras(p.tenantId, b)),
       priority: Number.isInteger(b.priority) ? b.priority : 0, purpose: requireString(b.purpose, 'purpose', 100)
     };
     const saved = await q(db.from('ntf_rules').insert(row).select().single());

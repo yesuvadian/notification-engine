@@ -82,6 +82,36 @@ class EventsData {
     return code ?? '?';
   }
 
+  /// People linked to the record that the product sends with [code] (event metadata
+  /// recipientAttributes, e.g. Flat owner, Task creator): [{code, label}].
+  List<Json> recordPeople(String code) {
+    final version = latestEventVersion(code);
+    final event = d.events
+        .where((e) => e['code'] == code && ((e['version'] as num?)?.toInt() ?? 1) == version)
+        .firstOrNull;
+    final metadata = event?['metadata'];
+    final list = metadata is Map ? metadata['recipientAttributes'] : null;
+    return [
+      for (final a in (list is List ? list : const []))
+        if (a is Map && a['code'] is String) Map<String, dynamic>.from(a),
+    ];
+  }
+
+  String recordPersonLabel(String event, String code) =>
+      '${recordPeople(event).where((a) => a['code'] == code).firstOrNull?['label'] ?? code}';
+
+  /// Record people a rule also notifies (attribute_codes).
+  static List<String> ruleAttributes(Json rule) => [
+        for (final c in (rule['attribute_codes'] as List? ?? const []))
+          if (c is String && c.isNotEmpty) c,
+      ];
+
+  /// Numbers an admin listed on a rule (custom_phones, E.164).
+  static List<String> rulePhones(Json rule) => [
+        for (final c in (rule['custom_phones'] as List? ?? const []))
+          if (c is String && c.isNotEmpty) c,
+      ];
+
   /// The roles of an "Everyone with a role" rule: role_codes, else the older single role_code.
   static List<String> ruleRoles(Json rule) {
     final many = [
@@ -226,11 +256,20 @@ class _EventCard extends StatelessWidget {
   List<Widget> _summary(BuildContext context, Json? rule) {
     if (rule == null) return [Text('Not set up', style: Theme.of(context).textTheme.bodySmall)];
     final strategy = rule['recipient_strategy'];
-    final who = strategy == 'ALL_USERS_IN_ROLE'
+    final base = strategy == 'ALL_USERS_IN_ROLE'
         ? EventsData.ruleRoles(rule).map(data.roleName).join(', ')
         : strategy == 'ALL_ORG_USERS'
             ? 'Everyone'
-            : 'Decided by $pc';
+            : strategy == 'NONE'
+                ? null
+                : 'Decided by $pc';
+    final people = EventsData.ruleAttributes(rule).map((c) => data.recordPersonLabel(event, c)).toList();
+    final phones = EventsData.rulePhones(rule).length;
+    final who = [
+      if (base != null) base,
+      ...people,
+      if (phones > 0) '$phones ${phones == 1 ? 'number' : 'numbers'}',
+    ].join(' + ');
     final bound = data.d.bindings.where((b) => b['rule_id'] == rule['id']).toList()
       ..sort((a, b) => kChannels.indexOf(a['channel'] as String) - kChannels.indexOf(b['channel'] as String));
     final own = bound.where((b) => data.override(b['template_id'] as String, b['channel'] as String) != null).length;
@@ -387,7 +426,8 @@ class _WhoGetsIt extends StatelessWidget {
       if (await runAction(context, () => org.updateRule(id, {'role_codes': sorted}), done: 'Roles saved')) await reload();
     }
 
-    return Wrap(spacing: 16, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.end, children: [
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, spacing: 12, children: [
+     Wrap(spacing: 16, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.end, children: [
       SizedBox(
         width: 340,
         child: DropdownButtonFormField<String>(
@@ -399,6 +439,7 @@ class _WhoGetsIt extends StatelessWidget {
             DropdownMenuItem(value: 'RECIPIENTS', child: Text('Decided by $pc (its notification roles)')),
             const DropdownMenuItem(value: 'ALL_USERS_IN_ROLE', child: Text('Everyone with a role')),
             const DropdownMenuItem(value: 'ALL_ORG_USERS', child: Text('Everyone in the organization')),
+            const DropdownMenuItem(value: 'NONE', child: Text('Only the people chosen below')),
           ],
           onChanged: (v) async {
             if (v == null || v == strategy) return;
@@ -437,6 +478,8 @@ class _WhoGetsIt extends StatelessWidget {
           child: Text('$pc sends the people with each event, from its own role settings.',
               style: Theme.of(context).textTheme.bodySmall),
         ),
+     ]),
+     _AlsoNotify(org: org, rule: rule, data: data, reload: reload),
     ]);
   }
 }
@@ -623,6 +666,125 @@ class _Panel extends StatelessWidget {
         for (final l in lines) Text(l, style: theme.textTheme.bodySmall),
         if (actions.isNotEmpty) Wrap(children: actions),
       ]),
+    );
+  }
+}
+
+
+/// E.164 for a typed number: +<country><number>; a 10-digit Indian mobile (or 0 / 91 + it) gets +91.
+/// Null when it is not a phone number. Same rule as the engine API.
+String? normalizePhone(String value) {
+  final raw = value.trim();
+  final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+  String? out;
+  if (raw.startsWith('+')) {
+    out = '+$digits';
+  } else if (RegExp(r'^[6-9][0-9]{9}$').hasMatch(digits)) {
+    out = '+91$digits';
+  } else if (RegExp(r'^0[6-9][0-9]{9}$').hasMatch(digits)) {
+    out = '+91${digits.substring(1)}';
+  } else if (RegExp(r'^91[6-9][0-9]{9}$').hasMatch(digits)) {
+    out = '+$digits';
+  }
+  return out != null && RegExp(r'^\+[1-9][0-9]{7,14}$').hasMatch(out) ? out : null;
+}
+
+/// "Also notify": people linked to the record (from the product, e.g. Flat owner, Task creator) and phone
+/// numbers the admin lists (a vendor, an agency). Added to whoever the recipients above are.
+class _AlsoNotify extends StatefulWidget {
+  final NotificationApi org;
+  final Json rule;
+  final EventsData data;
+  final Future<void> Function() reload;
+  const _AlsoNotify({required this.org, required this.rule, required this.data, required this.reload});
+
+  @override
+  State<_AlsoNotify> createState() => _AlsoNotifyState();
+}
+
+class _AlsoNotifyState extends State<_AlsoNotify> {
+  final _phone = TextEditingController();
+
+  String get id => widget.rule['id'] as String;
+  String get event => '${widget.rule['event_code']}';
+
+  @override
+  void dispose() {
+    _phone.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save(Map<String, dynamic> patch, String done) async {
+    if (await runAction(context, () => widget.org.updateRule(id, patch), done: done)) await widget.reload();
+  }
+
+  Future<void> _add(List<String> phones) async {
+    final phone = normalizePhone(_phone.text);
+    if (phone == null) return toast(context, 'Enter a phone number, e.g. +91 98765 43210');
+    if (phones.contains(phone)) return toast(context, '$phone is already on the list');
+    if (phones.length >= 20) return toast(context, 'Up to 20 numbers per notification');
+    await _save({'custom_phones': [...phones, phone]}, 'Number added');
+    if (mounted) _phone.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pc = (widget.org.productCode ?? 'The product').toUpperCase();
+    final small = Theme.of(context).textTheme.bodySmall;
+    final people = widget.data.recordPeople(event);
+    final chosen = EventsData.ruleAttributes(widget.rule);
+    final phones = EventsData.rulePhones(widget.rule);
+    return Column(
+      key: ValueKey('also-$id'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 8,
+      children: [
+        Text('Also notify', style: Theme.of(context).textTheme.titleSmall),
+        if (people.isEmpty)
+          Text('$pc sends no people linked to this event.', style: small)
+        else
+          Wrap(spacing: 8, runSpacing: 6, children: [
+            for (final p in people)
+              FilterChip(
+                key: ValueKey('attr-$id-${p['code']}'),
+                avatar: const Icon(Icons.person_pin_outlined, size: 18),
+                label: Text('${p['label'] ?? p['code']}'),
+                tooltip: p['note'] as String?,
+                selected: chosen.contains(p['code']),
+                onSelected: (on) {
+                  final next = on ? [...chosen, p['code'] as String] : ([...chosen]..remove(p['code']));
+                  _save({'attribute_codes': next..sort()}, 'Saved');
+                },
+              ),
+          ]),
+        Wrap(spacing: 8, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          for (final phone in phones)
+            InputChip(
+              key: ValueKey('phone-$id-$phone'),
+              avatar: const Icon(Icons.phone_outlined, size: 18),
+              label: Text(phone),
+              onDeleted: () => _save({'custom_phones': [...phones]..remove(phone)}, 'Number removed'),
+            ),
+          SizedBox(
+            width: 220,
+            child: TextField(
+              key: ValueKey('phone-input-$id'),
+              controller: _phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Add a phone number', hintText: '+91 98765 43210', isDense: true),
+              onSubmitted: (_) => _add(phones),
+            ),
+          ),
+          TextButton.icon(
+            key: ValueKey('phone-add-$id'),
+            onPressed: () => _add(phones),
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('Add number'),
+          ),
+        ]),
+        Text('SMS and WhatsApp go to these numbers when the channel is on for the organization. '
+            'Add only numbers whose owners agreed to get them.', style: small),
+      ],
     );
   }
 }

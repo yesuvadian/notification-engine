@@ -8,7 +8,7 @@ import { merge } from './parser.mjs';
 import { audit, db, q } from './db.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel, SendResult } from './adapters/types.ts';
-import { applyMappings, backoffSeconds, contextRecipients, eligible, matchesConditions, Preference, renderContent, ruleRoleCodes } from './logic.ts';
+import { applyMappings, backoffSeconds, contextRecipients, eligible, extraRecipients, hasLogin, matchesConditions, phoneUserId, Preference, renderContent, ruleRoleCodes } from './logic.ts';
 
 const EVENT_VT = 120;
 const DELIVERY_VT = 90;
@@ -61,7 +61,8 @@ async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueue
     } else {
       ids = contextRecipients(r.recipient_strategy, e.payload);
     }
-    ids = [...new Set(ids)];
+    // Plus the record people the rule names (flat owner, task creator...) and the numbers an admin listed.
+    ids = [...new Set([...ids, ...extraRecipients(r, e.payload)])];
     ids.forEach((i) => allIds.add(i));
     perRule.push({ rule: r, ids });
   }
@@ -102,13 +103,20 @@ async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueue
   for (const { rule, ids } of perRule) {
     const channels: Row[] = (await q(db.from('ntf_rule_channels').select('*').eq('rule_id', rule.id).eq('tenant_id', t.id)))
       .sort((a: Row, b: Row) => Number(b.channel === 'IN_APP') - Number(a.channel === 'IN_APP'));
+    // Numbers an admin listed on this rule: adding them is the consent record.
+    const listed = new Set((Array.isArray(rule.custom_phones) ? rule.custom_phones : []).map((p: string) => phoneUserId(p)));
     for (const id of ids) {
       const u = users.get(id);
       if (!u) continue;
       const nKey = `${id}|${rule.purpose}`;
       for (const ch of channels) {
         if (groupChannels && !groupChannels.has(ch.channel)) continue;
-        if (!eligible(ch.channel, channelEnabled.get(ch.channel) ?? false, prefs.get(`${id}|${ch.channel}`))) continue;
+        // No login (owner contacts, listed numbers): SMS / WhatsApp only.
+        if (ch.channel === 'IN_APP' && !hasLogin(id)) continue;
+        const enabled = channelEnabled.get(ch.channel) ?? false;
+        const pref = prefs.get(`${id}|${ch.channel}`);
+        const listedOk = listed.has(id) && enabled && pref?.enabled !== false;
+        if (!listedOk && !eligible(ch.channel, enabled, pref)) continue;
         const tpl = await resolveTemplate(ch);
         const ctx: Row = { ...e.payload, recipient: { name: u.display_name, id: u.user_id, locale: u.locale }, organization: { name: t.org?.name ?? '' } };
         let rendered: Row;

@@ -62,6 +62,66 @@ export function roleFields(b: Record<string, unknown>): { role_code: string | nu
   return null;
 }
 
+const ATTRIBUTE_RE = /^[a-z][a-z0-9_]{0,39}$/;
+
+/**
+ * attribute_codes from a rule body: record people the product sends with the event (e.g. flat_owner,
+ * record_creator). Returns null when not given; throws a message on bad input.
+ */
+export function attributeFields(b: Record<string, unknown>): { attribute_codes: string[] } | null {
+  if (!('attribute_codes' in b)) return null;
+  const v = b.attribute_codes;
+  if (!Array.isArray(v) || v.length > 20 || v.some((c) => typeof c !== 'string' || !ATTRIBUTE_RE.test(c))) {
+    throw new Error('attribute_codes must be a list of up to 20 codes such as flat_owner');
+  }
+  return { attribute_codes: [...new Set(v as string[])] };
+}
+
+/** A phone number as E.164: +<country><number>; a 10-digit Indian mobile (or 0 / 91 + it) gets +91. Null when invalid. */
+export function normalizePhone(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  const digits = raw.replace(/[^0-9]/g, '');
+  let out: string | null = null;
+  if (raw.startsWith('+')) out = '+' + digits;
+  else if (/^[6-9][0-9]{9}$/.test(digits)) out = '+91' + digits;
+  else if (/^0[6-9][0-9]{9}$/.test(digits)) out = '+91' + digits.slice(1);
+  else if (/^91[6-9][0-9]{9}$/.test(digits)) out = '+' + digits;
+  return out && /^\+[1-9][0-9]{7,14}$/.test(out) ? out : null;
+}
+
+/** custom_phones from a rule body, normalized to E.164 and de-duplicated; null when not given. */
+export function phoneFields(b: Record<string, unknown>): { custom_phones: string[] } | null {
+  if (!('custom_phones' in b)) return null;
+  const v = b.custom_phones;
+  if (!Array.isArray(v) || v.length > 20) throw new Error('custom_phones must be a list of up to 20 phone numbers');
+  const out: string[] = [];
+  for (const item of v) {
+    const phone = normalizePhone(item);
+    if (!phone) throw new Error(`${String(item)} is not a phone number (use +<country code><number>)`);
+    if (!out.includes(phone)) out.push(phone);
+  }
+  return { custom_phones: out };
+}
+
+/** The engine user id for a number an admin listed on a rule. */
+export const phoneUserId = (phone: string) => `phone:${phone}`;
+
+/** Extra recipients of a rule: the record people it names (from the event) and its listed numbers. */
+export function extraRecipients(rule: { attribute_codes?: unknown; custom_phones?: unknown }, payload: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  for (const code of Array.isArray(rule.attribute_codes) ? rule.attribute_codes : []) {
+    if (typeof code === 'string' && ATTRIBUTE_RE.test(code)) contextRecipients(code, payload).forEach((id) => out.add(id));
+  }
+  for (const phone of Array.isArray(rule.custom_phones) ? rule.custom_phones : []) {
+    if (typeof phone === 'string') out.add(phoneUserId(phone));
+  }
+  return [...out];
+}
+
+/** Users with no login (owner contacts, listed numbers) get SMS / WhatsApp, never an in-app delivery. */
+export const hasLogin = (userId: string) => !userId.startsWith('phone:') && !userId.startsWith('person:');
+
 export interface Preference { enabled: boolean; consent_at: string | null }
 
 /** In-app needs no consent; external channels need an enabled channel plus recorded consent. */

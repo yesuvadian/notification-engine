@@ -1,6 +1,6 @@
 // deno test tests/logic.test.ts
 import { assert, assertEquals, assertThrows } from 'jsr:@std/assert@1';
-import { applyMappings, backoffSeconds, contextRecipients, eligible, eventVariables, matchesConditions, productVariableReport, renderContent, roleFields, ruleRoleCodes, schemaFields, variableIssues } from '../supabase/functions/notification/logic.ts';
+import { applyMappings, backoffSeconds, contextRecipients, eligible, eventVariables, matchesConditions, productVariableReport, renderContent, attributeFields, extraRecipients, hasLogin, normalizePhone, phoneFields, roleFields, ruleRoleCodes, schemaFields, variableIssues } from '../supabase/functions/notification/logic.ts';
 import { decodeCursor, encodeCursor, mapDbError, DbError, safeEqual, normalizePath } from '../supabase/functions/notification/http.ts';
 
 Deno.test('backoff grows, is capped and honours Retry-After', () => {
@@ -129,4 +129,32 @@ Deno.test('rule bodies: role_codes wins, role_code alone is a one-role list, bad
   assertThrows(() => roleFields({ role_codes: [''] }));
   assertThrows(() => roleFields({ role_codes: Array.from({ length: 21 }, (_, i) => `r${i}`) }));
   assertThrows(() => roleFields({ role_code: 7 }));
+});
+
+Deno.test('rules can name record people the product sends with the event', () => {
+  assertEquals(attributeFields({ attribute_codes: ['flat_owner', 'record_creator', 'flat_owner'] }), { attribute_codes: ['flat_owner', 'record_creator'] });
+  assertEquals(attributeFields({ attribute_codes: [] }), { attribute_codes: [] });
+  assertEquals(attributeFields({ purpose: 'x' }), null);
+  assertThrows(() => attributeFields({ attribute_codes: ['Flat Owner'] }));
+  assertThrows(() => attributeFields({ attribute_codes: 'flat_owner' }));
+  const payload = { recipientContext: { flat_owner: ['person:o1'], record_creator: ['u7'], recipients: ['u1'] } };
+  assertEquals(extraRecipients({ attribute_codes: ['flat_owner', 'record_creator', 'task_starter'] }, payload).sort(), ['person:o1', 'u7']);
+  assertEquals(extraRecipients({ attribute_codes: ['flat_owner'], custom_phones: ['+919876543210'] }, payload), ['person:o1', 'phone:+919876543210']);
+  assertEquals(extraRecipients({}, payload), []);
+});
+
+Deno.test('custom numbers are normalized to E.164 and checked', () => {
+  assertEquals(normalizePhone('98765 43210'), '+919876543210');
+  assertEquals(normalizePhone('098765-43210'), '+919876543210');
+  assertEquals(normalizePhone('91 9876543210'), '+919876543210');
+  assertEquals(normalizePhone('+1 (415) 555-0100'), '+14155550100');
+  assertEquals(normalizePhone('12345'), null);
+  assertEquals(normalizePhone('5876543210'), null);
+  assertEquals(phoneFields({ custom_phones: ['98765 43210', '+919876543210', '+14155550100'] }), { custom_phones: ['+919876543210', '+14155550100'] });
+  assertEquals(phoneFields({ role_code: 'x' }), null);
+  assertThrows(() => phoneFields({ custom_phones: ['not a number'] }));
+  assertThrows(() => phoneFields({ custom_phones: Array.from({ length: 21 }, (_, i) => `98765432${String(i).padStart(2, '0')}`) }));
+  assert(hasLogin('u1'));
+  assert(!hasLogin('phone:+919876543210'));
+  assert(!hasLogin('person:p1'));
 });
