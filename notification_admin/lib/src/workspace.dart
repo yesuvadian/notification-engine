@@ -3,6 +3,7 @@ import 'package:notification_sdk/notification_sdk.dart';
 
 import 'common.dart';
 import 'designer.dart';
+import 'events_tab.dart';
 import 'platform_api.dart';
 
 /// B: one organization's notification workspace, opened by the super admin from the organization list.
@@ -17,7 +18,7 @@ class OrganizationWorkspace extends StatelessWidget {
   final String organizationId;
   final String organizationName;
 
-  /// Tab to open on: 0 Rules, 1 Templates & wording, 2 Channels, ...
+  /// Tab to open on: 0 Notifications, 1 Channels on/off, 2 Preferences, 3 Delivery log, 4 Audit.
   final int initialTab;
 
   OrganizationWorkspace({
@@ -39,7 +40,7 @@ class OrganizationWorkspace extends StatelessWidget {
     this.initialTab = 0,
   }) : api = null;
 
-  static const tabs = ['Rules', 'Templates & wording', 'Channels on/off', 'Preferences', 'Delivery log', 'Audit'];
+  static const tabs = ['Notifications', 'Channels on/off', 'Preferences', 'Delivery log', 'Audit'];
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
@@ -49,16 +50,15 @@ class OrganizationWorkspace extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text(
-                '$organizationName: turn channels on or off in "Channels on/off"; change this organization\'s wording '
-                'in "Templates & wording" (Override); choose who hears about each event in "Rules".',
+                '$organizationName: each event has one card in "Notifications" with who gets it, its channels, and the '
+                'platform wording next to this organization\'s own wording. "Channels on/off" turns a channel on for the whole organization.',
                 key: const ValueKey('workspace-help'),
                 style: Theme.of(context).textTheme.bodySmall),
           ),
           TabBar(isScrollable: true, tabs: [for (final t in tabs) Tab(text: t)]),
           Expanded(
             child: TabBarView(children: [
-              RulesTab(org: org),
-              OrgTemplatesTab(org: org),
+              EventsTab(org: org, organizationName: organizationName),
               OrgChannelsTab(org: org),
               OrgPreferencesTab(org: org),
               DeliveryLogTab(org: org),

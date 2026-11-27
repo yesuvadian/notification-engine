@@ -117,16 +117,26 @@ class TemplateDesigner extends StatefulWidget {
   final Json template;
   final int? baseVersion;
   final String? eventCode;
+
+  /// Event version whose variables the override designer offers (the rule's event_version).
+  final int eventVersion;
   final String initialChannel;
 
   const TemplateDesigner.platform({super.key, required NotificationPlatformApi api, required this.template, this.initialChannel = 'IN_APP'})
       : platformApi = api,
         orgApi = null,
         baseVersion = null,
-        eventCode = null;
+        eventCode = null,
+        eventVersion = 1;
 
   const TemplateDesigner.override(
-      {super.key, required NotificationApi api, required this.template, required int this.baseVersion, this.eventCode, this.initialChannel = 'IN_APP'})
+      {super.key,
+      required NotificationApi api,
+      required this.template,
+      required int this.baseVersion,
+      this.eventCode,
+      this.eventVersion = 1,
+      this.initialChannel = 'IN_APP'})
       : orgApi = api,
         platformApi = null;
 
@@ -169,7 +179,7 @@ class TemplateDesignerState extends State<TemplateDesigner> {
         _fill(effective);
         if (widget.eventCode != null && variables.isEmpty) {
           try {
-            variables = await widget.orgApi!.eventVariables(widget.eventCode!);
+            variables = await widget.orgApi!.eventVariables(widget.eventCode!, version: widget.eventVersion);
           } catch (_) {}
         }
       } else {
@@ -408,6 +418,39 @@ class TemplateDesignerState extends State<TemplateDesigner> {
     );
   }
 
+  /// Override mode: the platform's wording for this channel, read-only, so the two are never confused.
+  Widget _platformWording(BuildContext context) {
+    final theme = Theme.of(context);
+    final fields = [for (final f in channelFields[channel]!) if ((base[f] ?? '').toString().isNotEmpty) f];
+    return Container(
+      key: const ValueKey('platform-wording'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withAlpha(110),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.lock_outline, size: 14, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Text('PLATFORM WORDING · v${widget.baseVersion} · read-only', style: _label),
+        ]),
+        const SizedBox(height: 6),
+        if (fields.isEmpty) Text('The platform template has no ${chLabel(channel)} wording.', style: theme.textTheme.bodySmall),
+        for (final f in fields)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text.rich(TextSpan(children: [
+              TextSpan(text: '${_fieldLabel(f)}: ', style: const TextStyle(fontWeight: FontWeight.w600)),
+              TextSpan(text: '${base[f]}'),
+            ]), style: theme.textTheme.bodySmall),
+          ),
+      ]),
+    );
+  }
+
   String _fieldLabel(String f) => const {
         'title': 'Title',
         'body': 'Message body',
@@ -460,6 +503,12 @@ class TemplateDesignerState extends State<TemplateDesigner> {
           ],
         ]),
         const Divider(height: 20),
+        if (widget.isOverride) ...[
+          _platformWording(context),
+          const SizedBox(height: 12),
+          const Text("THIS ORGANIZATION'S WORDING", style: _label),
+          const SizedBox(height: 8),
+        ],
         for (final f in channelFields[channel]!) ...[
           if (f == 'body' || f == 'params') ...[
             Text(f == 'body' ? 'BODY' : 'PARAMETERS', style: _label),
