@@ -31,6 +31,11 @@ Future<void> shot(WidgetTester t, GlobalKey key, String name) async {
 }
 
 void main() {
+  // Screenshots only on request (they need the Linux Flutter font cache below).
+  if (Platform.environment['SHOTS'] != '1') {
+    test('screenshots', () {}, skip: 'Set SHOTS=1 to render the screenshots');
+    return;
+  }
   const fonts = '/opt/f338/flutter/bin/cache/artifacts/material_fonts';
   setUpAll(() async {
     await loadFont('Roboto', ['$fonts/Roboto-Regular.ttf', '$fonts/Roboto-Medium.ttf', '$fonts/Roboto-Bold.ttf']);

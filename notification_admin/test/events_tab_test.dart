@@ -226,10 +226,7 @@ void main() {
     await t.pumpAndSettle();
     expect(f.hits('PUT /v1/admin/rules/r1'), isEmpty);
     expect(find.textContaining('already on the list'), findsOneWidget);
-    await t.tap(find.descendant(
-      of: find.byKey(const ValueKey('phone-r1-+919876543210')),
-      matching: find.byIcon(Icons.cancel),
-    ));
+    await t.tap(find.byTooltip('Remove +919876543210'));
     await t.pumpAndSettle();
     expect(f.bodies('PUT /v1/admin/rules/r1').single, {'custom_phones': ['+14155550100']});
   });

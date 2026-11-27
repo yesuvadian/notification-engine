@@ -467,7 +467,7 @@ class _WhoGetsIt extends StatelessWidget {
                   key: ValueKey('role-$id-${r['code']}'),
                   label: Text('${r['name'] ?? r['code']}'),
                   selected: known.contains(r['code']),
-                  onSelected: (on) => setRoles(on ? [...known, r['code'] as String] : [...known]..remove(r['code'])),
+                  onSelected: (on) => setRoles(on ? [...known, r['code'] as String] : ([...known]..remove(r['code']))),
                 ),
             ]),
           ),
@@ -763,6 +763,8 @@ class _AlsoNotifyState extends State<_AlsoNotify> {
               key: ValueKey('phone-$id-$phone'),
               avatar: const Icon(Icons.phone_outlined, size: 18),
               label: Text(phone),
+              deleteIcon: const Icon(Icons.close, size: 18),
+              deleteButtonTooltipMessage: 'Remove $phone',
               onDeleted: () => _save({'custom_phones': [...phones]..remove(phone)}, 'Number removed'),
             ),
           SizedBox(
