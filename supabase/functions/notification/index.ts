@@ -11,7 +11,7 @@ import { runWorker } from './worker.ts';
 import { platform } from './platform.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel } from './adapters/types.ts';
-import { jsonEqual, schemaVariables } from './logic.ts';
+import { eventVariables, jsonEqual, VARIABLE_NAME_RE, VARIABLE_TYPES, VariableDef, variableIssues } from './logic.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -119,6 +119,27 @@ async function syncRoles(p: Principal, b: Body, cid: string) {
 async function syncMetadata(p: Principal, b: Body, cid: string) {
   if (!isServer(p)) forbid();
   const events = requireArray(b.events, 'events', 200) as Body[];
+  const vars = await productVariables(p.productId);
+  const declared = await declareVariables(p, b.variables, vars);
+  // Every event field must match the product's variables before anything is written.
+  const newFields = new Map<string, string>();
+  for (const ev of events) {
+    const code = String(ev?.code ?? '');
+    // A contract the engine already holds is not re-checked, so products syncing it again keep working.
+    const same = await q(db.from('ntf_events').select('payload_schema').eq('product_id', p.productId).eq('code', code)
+      .eq('version', Number.isInteger(ev?.version) ? ev.version : 1).maybeSingle());
+    if (same && jsonEqual(same.payload_schema, ev?.payloadSchema)) continue;
+    const { mismatched, invalid, unknown } = variableIssues(ev?.payloadSchema, vars);
+    if (invalid.length) throw new ApiError(422, 'invalid_variable', `${code}: ${invalid.join(', ')} cannot be variables (letters, digits and _ only, a JSON type)`);
+    if (mismatched.length) {
+      throw new ApiError(422, 'variable_mismatch', `${code}: ` + mismatched.map((x) => `data.${x.name} is ${x.type} but the product variable is ${x.expected}`).join('; '));
+    }
+    for (const u of unknown) {
+      const seen = newFields.get(u.name);
+      if (seen && seen !== u.type) throw new ApiError(422, 'variable_mismatch', `data.${u.name} is ${seen} in one event and ${u.type} in another`);
+      newFields.set(u.name, u.type);
+    }
+  }
   const TRIGGERS = ['WORKFLOW_TRANSITION', 'STATUS_CHANGE', 'ACTION', 'RECORD_CREATED', 'RECORD_UPDATED', 'ASSIGNMENT', 'SCHEDULED', 'MANUAL', 'SYSTEM_EVENT'];
   let created = 0, unchanged = 0;
   for (const ev of events) {
@@ -150,8 +171,44 @@ async function syncMetadata(p: Principal, b: Body, cid: string) {
       created++;
     }
   }
-  await audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action: 'metadata.sync', details: { created, unchanged }, correlationId: cid });
-  return json({ created, unchanged }, 200, cid);
+  if (newFields.size) {
+    await q(db.from('ntf_variables').insert([...newFields].map(([name, type]) => ({ product_id: p.productId, name, type, source: 'product' }))));
+  }
+  const added = [...declared, ...newFields.keys()];
+  await audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action: 'metadata.sync', details: { created, unchanged, variablesAdded: added }, correlationId: cid });
+  return json({ created, unchanged, variablesAdded: added }, 200, cid);
+}
+
+async function productVariables(productId: string): Promise<VariableDef[]> {
+  return await q(db.from('ntf_variables').select('name,type,description,example,source').eq('product_id', productId));
+}
+
+/** Optional `variables` in a metadata sync: the product declares its own fields. A name it already has keeps its type. */
+async function declareVariables(p: Principal, input: unknown, vars: VariableDef[]): Promise<string[]> {
+  if (input == null) return [];
+  const list = requireArray(input, 'variables', 200) as Body[];
+  const added: string[] = [];
+  for (const v of list) {
+    const name = requireString(v?.name, 'variables[].name', 50);
+    const type = String(v?.type ?? 'string');
+    if (!VARIABLE_NAME_RE.test(name)) throw new ApiError(422, 'invalid_variable', `${name}: letters, digits and _ only`);
+    if (!VARIABLE_TYPES.includes(type)) throw new ApiError(422, 'invalid_variable', `${name}: type must be one of ${VARIABLE_TYPES.join(', ')}`);
+    const description = typeof v.description === 'string' ? v.description.slice(0, 500) : null;
+    const example = typeof v.example === 'string' ? v.example.slice(0, 200) : null;
+    const have = vars.find((x) => x.name === name);
+    if (have) {
+      if (have.type !== type) throw new ApiError(422, 'variable_mismatch', `${name} is ${have.type} for this product; it cannot become ${type}`);
+      if (have.source === 'product' && (description !== (have.description ?? null) || example !== (have.example ?? null))) {
+        await q(db.from('ntf_variables').update({ description, example, updated_at: new Date().toISOString() }).eq('product_id', p.productId).eq('name', name));
+        Object.assign(have, { description, example });
+      }
+      continue;
+    }
+    await q(db.from('ntf_variables').insert({ product_id: p.productId, name, type, description, example, source: 'product' }));
+    vars.push({ name, type, description, example, source: 'product' });
+    added.push(name);
+  }
+  return added;
 }
 
 async function provisionTenant(req: Request, b: Body, cid: string) {
@@ -397,12 +454,7 @@ async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid
     const version = Number(new URL(req.url).searchParams.get('version') ?? 1);
     const ev = await q(db.from('ntf_events').select('payload_schema,metadata').eq('product_id', p.productId).eq('code', id).eq('version', version).maybeSingle());
     if (!ev) throw new ApiError(404, 'not_found', 'Event not found');
-    return json({ variables: [
-      ...schemaVariables(ev.payload_schema, 'data'),
-      { path: 'recipient.name', type: 'string', required: false, description: 'Recipient display name' },
-      { path: 'recipient.id', type: 'string', required: true, description: 'Recipient user id' },
-      { path: 'recipient.locale', type: 'string', required: false, description: 'Recipient locale' }
-    ] }, 200, cid);
+    return json({ variables: eventVariables(ev.payload_schema, await productVariables(p.productId)) }, 200, cid);
   }
 
   // Deliveries: GET /deliveries/{id}/attempts, POST /deliveries/{id}/retry

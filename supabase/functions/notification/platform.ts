@@ -7,6 +7,7 @@ import { ApiError, json, randomToken, requireArray, requireString, sha256Hex, UU
 import { validateProviderConfig } from './config.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel } from './adapters/types.ts';
+import { productVariableReport, VARIABLE_NAME_RE, VARIABLE_TYPES } from './logic.ts';
 
 // deno-lint-ignore no-explicit-any
 type Body = Record<string, any>;
@@ -25,6 +26,16 @@ function channelOf(v: unknown, allowed = CHANNELS): string {
   const c = String(v ?? '').toUpperCase();
   if (!allowed.includes(c)) throw new ApiError(422, 'invalid_request', `channel must be one of ${allowed.join(', ')}`);
   return c;
+}
+
+function variableInput(name: string, b: Body) {
+  const n = decodeURIComponent(name);
+  if (!VARIABLE_NAME_RE.test(n)) throw new ApiError(422, 'invalid_variable', 'name: letters, digits and _ only, starting with a letter');
+  const type = String(b.type ?? 'string');
+  if (!VARIABLE_TYPES.includes(type)) throw new ApiError(422, 'invalid_variable', `type must be one of ${VARIABLE_TYPES.join(', ')}`);
+  const description = typeof b.description === 'string' && b.description.trim() ? b.description.trim().slice(0, 500) : null;
+  const example = typeof b.example === 'string' && b.example.trim() ? b.example.trim().slice(0, 200) : null;
+  return { name: n, type, description, example };
 }
 
 export async function platform(p: Principal, req: Request, path: string, b: Body, cid: string): Promise<Response> {
@@ -79,6 +90,35 @@ export async function platform(p: Principal, req: Request, path: string, b: Body
       await q(db.from('ntf_product_channel_defaults').upsert(rows));
       await log('product.channels', { code: product.code, items: rows.map(({ channel, supported, default_enabled }) => ({ channel, supported, default_enabled })) }, null, product.id);
       return json(await q(db.from('ntf_product_channel_defaults').select('channel,supported,default_enabled').eq('product_id', product.id)), 200, cid);
+    }
+    // GET /products/{code}/variables = the product's variables, the events that use each and how they match.
+    if (seg[2] === 'variables' && seg.length === 3 && m === 'GET') {
+      const [vars, defaults, events] = await Promise.all([
+        q(db.from('ntf_variables').select('name,type,description,example,source').eq('product_id', product.id).order('name')),
+        q(db.from('ntf_variables').select('name,type').is('product_id', null)),
+        q(db.from('ntf_events').select('code,version,payload_schema').eq('product_id', product.id).order('code').order('version'))
+      ]);
+      return json(productVariableReport(vars, defaults, events), 200, cid);
+    }
+    // POST /products/{code}/variables/defaults = copy platform defaults the product does not have yet.
+    if (seg[2] === 'variables' && seg[3] === 'defaults' && m === 'POST') {
+      const added = await q(db.rpc('ntf_copy_variable_defaults', { p_product: product.id }));
+      await log('product.variables.copy_defaults', { code: product.code, added }, null, product.id);
+      return json({ added }, 200, cid);
+    }
+    // PUT /products/{code}/variables/{name} = add a product variable or change its wording (type is fixed).
+    if (seg[2] === 'variables' && seg.length === 4 && m === 'PUT') {
+      const v = variableInput(seg[3], b);
+      const have = await q(db.from('ntf_variables').select('id,type').eq('product_id', product.id).eq('name', v.name).maybeSingle());
+      if (have && have.type !== v.type) throw new ApiError(409, 'type_locked', `${v.name} is ${have.type} for ${product.code}; events already send it that way`);
+      const def = await q(db.from('ntf_variables').select('type').is('product_id', null).eq('name', v.name).maybeSingle());
+      if (!have && def && def.type !== v.type) throw new ApiError(422, 'variable_mismatch', `${v.name} is ${def.type} on the platform; use that type or another name`);
+      const row = { description: v.description, example: v.example, updated_at: new Date().toISOString() };
+      const saved = have
+        ? await q(db.from('ntf_variables').update(row).eq('id', have.id).select('name,type,description,example,source').single())
+        : await q(db.from('ntf_variables').insert({ ...row, product_id: product.id, name: v.name, type: v.type, source: 'product' }).select('name,type,description,example,source').single());
+      await log(have ? 'product.variable.update' : 'product.variable.create', { code: product.code, name: v.name, type: v.type }, null, product.id);
+      return json(saved, have ? 200 : 201, cid);
     }
     if (seg[2] === 'tokens' && m === 'GET') {
       return json(await q(db.from('ntf_api_tokens').select('id,label,scope,created_at,expires_at,revoked_at')
@@ -222,6 +262,25 @@ export async function platform(p: Principal, req: Request, path: string, b: Body
   }
 
   // ---------------------------------------------------------------- platform templates
+  // ---------------------------------------------------------------- variables (product level, platform defaults)
+  // GET /variables = platform defaults; PUT /variables/{name} = add a default or change its wording (type is fixed).
+  if (seg[0] === 'variables') {
+    if (seg.length === 1 && m === 'GET') {
+      return json(await q(db.from('ntf_variables').select('name,type,description,example,updated_at').is('product_id', null).order('name')), 200, cid);
+    }
+    if (seg.length === 2 && m === 'PUT') {
+      const v = variableInput(seg[1], b);
+      const have = await q(db.from('ntf_variables').select('id,type').is('product_id', null).eq('name', v.name).maybeSingle());
+      if (have && have.type !== v.type) throw new ApiError(409, 'type_locked', `${v.name} is ${have.type}; add a variable with a new name instead`);
+      const row = { description: v.description, example: v.example, updated_at: new Date().toISOString() };
+      const saved = have
+        ? await q(db.from('ntf_variables').update(row).eq('id', have.id).select('name,type,description,example').single())
+        : await q(db.from('ntf_variables').insert({ ...row, product_id: null, name: v.name, type: v.type, source: 'platform' }).select('name,type,description,example').single());
+      await log(have ? 'variable.update' : 'variable.create', { name: v.name, type: v.type });
+      return json(saved, have ? 200 : 201, cid);
+    }
+  }
+
   if (seg[0] === 'templates') {
     if (seg.length === 1 && m === 'GET') {
       let s = db.from('ntf_templates').select('id,code,name,description,product_id,versions:ntf_template_versions(version,channel,locale,status,published_at,content,variables)').order('code');

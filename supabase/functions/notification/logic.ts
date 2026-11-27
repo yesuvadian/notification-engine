@@ -76,3 +76,91 @@ export function jsonEqual(a: unknown, b: unknown): boolean {
   const ka = Object.keys(a as object), kb = Object.keys(b as object);
   return ka.length === kb.length && ka.every((k) => Object.hasOwn(b as object, k) && jsonEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
 }
+
+/** A variable a product's events may send in `data` (spec: variables are product level, seeded from platform defaults). */
+export interface VariableDef { name: string; type: string; description?: string | null; example?: string | null; source?: string }
+export const VARIABLE_TYPES = ['string', 'number', 'integer', 'boolean', 'object', 'array'];
+export const VARIABLE_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,49}$/;
+
+/** Fields the engine adds to every render context; they are not sent by products. */
+export const BUILT_IN_VARIABLES: TemplateVariable[] = [
+  { path: 'recipient.name', type: 'string', required: false, description: 'Recipient display name' },
+  { path: 'recipient.id', type: 'string', required: true, description: 'Recipient user id' },
+  { path: 'recipient.locale', type: 'string', required: false, description: 'Recipient locale' },
+  { path: 'organization.name', type: 'string', required: false, description: 'Organization name' }
+];
+
+/** The top-level fields of an event's payload schema with their JSON types (string when unstated). */
+export function schemaFields(schema: unknown): { name: string; type: string }[] {
+  const s = (schema ?? {}) as Record<string, unknown>;
+  const props = (s.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const required = Array.isArray(s.required) ? (s.required as string[]) : [];
+  return [...new Set([...Object.keys(props), ...required])].map((name) => ({ name, type: String(props[name]?.type ?? 'string') }));
+}
+
+/**
+ * Compares an event's fields with the product's variables: `unknown` are fields the product has not declared yet,
+ * `mismatched` are fields whose type differs from the declared variable, `invalid` are names a variable cannot have.
+ */
+export function variableIssues(schema: unknown, vars: VariableDef[]) {
+  const byName = new Map(vars.map((v) => [v.name, v]));
+  const unknown: { name: string; type: string }[] = [];
+  const mismatched: { name: string; type: string; expected: string }[] = [];
+  const invalid: string[] = [];
+  for (const f of schemaFields(schema)) {
+    if (!VARIABLE_NAME_RE.test(f.name) || !VARIABLE_TYPES.includes(f.type)) { invalid.push(f.name); continue; }
+    const v = byName.get(f.name);
+    if (!v) unknown.push(f);
+    else if (v.type !== f.type) mismatched.push({ ...f, expected: v.type });
+  }
+  return { unknown, mismatched, invalid };
+}
+
+/** Template variables for an event: its data fields described from the product's variables, then the built-ins. */
+export function eventVariables(schema: unknown, vars: VariableDef[]): (TemplateVariable & { source: string; example?: string })[] {
+  const byName = new Map(vars.map((v) => [v.name, v]));
+  return [
+    ...schemaVariables(schema, 'data').map((t) => {
+      const v = byName.get(t.path.split('.')[1]);
+      return {
+        ...t,
+        ...(t.description ? {} : v?.description ? { description: v.description } : {}),
+        ...(v?.example ? { example: v.example } : {}),
+        source: v?.source ?? 'product'
+      };
+    }),
+    ...BUILT_IN_VARIABLES.map((t) => ({ ...t, source: 'built-in' }))
+  ];
+}
+
+/**
+ * The product's variables for the console: each with the events that send it and whether it matches the platform
+ * default of the same name; plus defaults the product has not copied and event fields it has not declared.
+ */
+export function productVariableReport(
+  vars: VariableDef[],
+  defaults: { name: string; type: string }[],
+  events: { code: string; version: number; payload_schema: unknown }[]
+) {
+  const def = new Map(defaults.map((d) => [d.name, d.type]));
+  const usedBy = new Map<string, string[]>();
+  const problems: { event: string; name: string; type: string; expected: string | null }[] = [];
+  for (const e of events) {
+    const { unknown, mismatched } = variableIssues(e.payload_schema, vars);
+    for (const f of schemaFields(e.payload_schema)) {
+      usedBy.set(f.name, [...(usedBy.get(f.name) ?? []), `${e.code} v${e.version}`]);
+    }
+    for (const u of unknown) problems.push({ event: `${e.code} v${e.version}`, name: u.name, type: u.type, expected: null });
+    for (const x of mismatched) problems.push({ event: `${e.code} v${e.version}`, name: x.name, type: x.type, expected: x.expected });
+  }
+  const have = new Set(vars.map((v) => v.name));
+  return {
+    variables: vars.map((v) => ({
+      ...v,
+      events: usedBy.get(v.name) ?? [],
+      matchesPlatform: !def.has(v.name) || def.get(v.name) === v.type
+    })),
+    missingDefaults: defaults.filter((d) => !have.has(d.name)).map((d) => d.name),
+    problems
+  };
+}

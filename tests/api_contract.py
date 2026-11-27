@@ -100,6 +100,16 @@ s,b,_=call('POST','/metadata/sync',S,{'events':[ev1]}); check('A metadata create
 s,b,_=call('POST','/metadata/sync',S,{'events':[ev2]}); check('A metadata same schema other key order',s==200 and b['unchanged']==1,(s,b))
 s,b,_=call('POST','/metadata/sync',S,{'events':[dict(ev1,payloadSchema={'type':'object','required':['b']})]}); check('A metadata changed contract 409',s==409,(s,b))
 
+# variables are product level: event fields must match the product's variables (platform defaults copied to it)
+code2='CONTRACT_VAR_%d'%random.randint(1,10**9)
+evv={'code':code2,'version':1,'moduleCode':'TEST','triggerType':'ACTION','payloadSchema':{'type':'object','properties':{'subject':{'type':'string'},'contract_field':{'type':'string'}}}}
+s,b,_=call('POST','/metadata/sync',S,{'events':[evv]}); check('A metadata new field declared',s==200 and b['created']==1,(s,b))
+s,b,_=call('POST','/metadata/sync',S,{'events':[dict(evv,version=2,payloadSchema={'properties':{'subject':{'type':'number'}}})]}); check('A metadata default with other type 422',s==422 and b['error']=='variable_mismatch',(s,b))
+s,b,_=call('POST','/metadata/sync',S,{'events':[dict(evv,version=2,payloadSchema={'properties':{'contract_field':{'type':'boolean'}}})]}); check('A metadata product field with other type 422',s==422 and b['error']=='variable_mismatch',(s,b))
+s,b,_=call('POST','/metadata/sync',S,{'events':[evv]}); check('A metadata same contract re-sync ok',s==200 and b['unchanged']==1,(s,b))
+s,b,_=call('GET','/admin/events/%s/variables?version=1'%code2,A,org=ORG); vs={v['path']:v for v in b.get('variables',[])} if s==200 else {}
+check('A variables carry source',vs.get('data.subject',{}).get('source')=='platform' and vs.get('data.contract_field',{}).get('source')=='product' and 'organization.name' in vs,(s,b))
+
 if FAILED:
     sys.exit('%d checks failed' % len(FAILED))
 print('All contract checks passed')

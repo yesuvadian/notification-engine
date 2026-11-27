@@ -641,8 +641,8 @@ void main() {
       });
       final m = NotificationAdminModule(api: platformFor(f), productCode: 'ass');
       expect(m.productMenu.map((e) => e.label), ['Organizations']);
-      expect(m.engineMenu.map((e) => e.label), ['Products', 'Channels', 'Templates', 'Operations', 'Audit']);
-      expect(m.menu, hasLength(6));
+      expect(m.engineMenu.map((e) => e.label), ['Products', 'Channels', 'Templates', 'Variables', 'Operations', 'Audit']);
+      expect(m.menu, hasLength(7));
       expect(await t.runAsync(m.canAdminister), isTrue);
       await t.pumpWidget(host(m.overviewCard()));
       await t.pumpAndSettle();

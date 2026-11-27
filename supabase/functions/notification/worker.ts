@@ -29,7 +29,7 @@ export interface WorkerStats {
 async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueued: number; renderErrors: number }> {
   const e = await q(db.from('ntf_event_log').select('*').eq('id', eventId).eq('tenant_id', tenantId).maybeSingle());
   if (!e) return { enqueued: 0, renderErrors: 0 };
-  const t = await q(db.from('ntf_tenants').select('id,active').eq('id', tenantId).single());
+  const t = await q(db.from('ntf_tenants').select('id,active,org:ntf_organizations(name)').eq('id', tenantId).single());
   if (!t.active) {
     await q(db.from('ntf_event_log').update({ status: 'PROCESSED', processed_at: new Date().toISOString(), last_error: 'tenant suspended' }).eq('id', e.id));
     return { enqueued: 0, renderErrors: 0 };
@@ -107,7 +107,7 @@ async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueue
         if (groupChannels && !groupChannels.has(ch.channel)) continue;
         if (!eligible(ch.channel, channelEnabled.get(ch.channel) ?? false, prefs.get(`${id}|${ch.channel}`))) continue;
         const tpl = await resolveTemplate(ch);
-        const ctx: Row = { ...e.payload, recipient: { name: u.display_name, id: u.user_id, locale: u.locale } };
+        const ctx: Row = { ...e.payload, recipient: { name: u.display_name, id: u.user_id, locale: u.locale }, organization: { name: t.org?.name ?? '' } };
         let rendered: Row;
         try {
           ctx.vars = applyMappings(ctx, ch.mappings);

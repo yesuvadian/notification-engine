@@ -91,6 +91,14 @@ s, b = call('GET', '/platform/nope', P); check('unknown platform resource 404', 
 # ------------------------------------------------------------------ 2. products, channel defaults, tokens, issuers
 code = 'tst_' + RUN
 s, b = call('POST', '/platform/products', P, {'code': code, 'name': 'Test product'}); check('create product 201', s == 201 and b['code'] == code, (s, b))
+s, b = call('GET', f'/platform/products/{code}/variables', P); check('new product has the platform default variables', s == 200 and {'subject', 'body'} <= {v['name'] for v in b['variables']} and b['missingDefaults'] == [], (s, b))
+s, b = call('PUT', f'/platform/variables/pv_{RUN}', P, {'type': 'string', 'description': 'Contract default'}); check('add platform default variable', s == 201, (s, b))
+s, b = call('PUT', f'/platform/variables/pv_{RUN}', P, {'type': 'number'}); check('platform variable type is fixed 409', s == 409, (s, b))
+s, b = call('GET', f'/platform/products/{code}/variables', P); check('new default is missing on the product', s == 200 and f'pv_{RUN}' in b['missingDefaults'], (s, b))
+s, b = call('POST', f'/platform/products/{code}/variables/defaults', P, {}); check('copy defaults to product', s == 200 and b['added'] == 1, (s, b))
+s, b = call('PUT', f'/platform/products/{code}/variables/flat', P, {'type': 'string', 'description': 'Flat number'}); check('add product variable', s == 201 and b['source'] == 'product', (s, b))
+s, b = call('PUT', f'/platform/products/{code}/variables/amount', P, {'type': 'string'}); check('product variable cannot change a default type', s in (409, 422), (s, b))
+s, b = call('PUT', f'/platform/products/{code}/variables/bad-name', P, {'type': 'string'}); check('bad variable name 422', s == 422, (s, b))
 s, b = call('POST', '/platform/products', P, {'code': code, 'name': 'Again'}); check('duplicate product 409', s == 409, (s, b))
 s, b = call('POST', '/platform/products', P, {'code': 'Bad Code', 'name': 'x'}); check('bad product code 422', s == 422, (s, b))
 s, b = call('PUT', f'/platform/products/{code}/channels', P, {'items': [{'channel': 'SMS', 'supported': True, 'default_enabled': False},

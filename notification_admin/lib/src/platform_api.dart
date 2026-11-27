@@ -147,6 +147,19 @@ class NotificationPlatformApi {
   Future<void> retireVersion(String templateId, int version) =>
       request('POST', '/v1/platform/templates/$templateId/versions/$version/retire', body: {});
 
+  // ---------------------------------------------------------------- variables (product level, platform defaults)
+  Future<List<Json>> variableDefaults() async => _list(await request('GET', '/v1/platform/variables'));
+  Future<Json> saveVariableDefault(String name, {required String type, String? description, String? example}) async =>
+      _map(await request('PUT', '/v1/platform/variables/${Uri.encodeComponent(name)}',
+          body: {'type': type, 'description': description, 'example': example}));
+  Future<Json> productVariables(String productCode) async =>
+      _map(await request('GET', '/v1/platform/products/$productCode/variables'));
+  Future<int> copyVariableDefaults(String productCode) async =>
+      ((await request('POST', '/v1/platform/products/$productCode/variables/defaults', body: {})) as Map)['added'] as int? ?? 0;
+  Future<Json> saveProductVariable(String productCode, String name, {required String type, String? description, String? example}) async =>
+      _map(await request('PUT', '/v1/platform/products/$productCode/variables/${Uri.encodeComponent(name)}',
+          body: {'type': type, 'description': description, 'example': example}));
+
   // ---------------------------------------------------------------- operations
   Future<Json> ops() async => _map(await request('GET', '/v1/platform/ops'));
   Future<void> replayDelivery(String id) => request('POST', '/v1/platform/deliveries/$id/replay', body: {});

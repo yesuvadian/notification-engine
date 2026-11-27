@@ -6,5 +6,6 @@ export 'src/module.dart';
 export 'src/platform_pages.dart';
 export 'src/workspace.dart';
 export 'src/designer.dart';
+export 'src/variables_page.dart';
 export 'src/organization_step.dart';
 export 'src/common.dart' show errorText, chLabel, kChannels, kExternalChannels, Loaded, PageHeader;
