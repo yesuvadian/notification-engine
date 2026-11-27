@@ -17,12 +17,16 @@ class OrganizationWorkspace extends StatelessWidget {
   final String organizationId;
   final String organizationName;
 
+  /// Tab to open on: 0 Rules, 1 Templates & wording, 2 Channels, ...
+  final int initialTab;
+
   OrganizationWorkspace({
     super.key,
     required NotificationPlatformApi this.api,
     required this.productCode,
     required this.organizationId,
     required this.organizationName,
+    this.initialTab = 0,
   }) : org = api.organization(productCode, organizationId);
 
   /// For tests and hosts that already hold an organization-scoped client.
@@ -32,14 +36,24 @@ class OrganizationWorkspace extends StatelessWidget {
     required this.productCode,
     required this.organizationId,
     required this.organizationName,
+    this.initialTab = 0,
   }) : api = null;
 
-  static const tabs = ['Rules', 'Templates', 'Channels', 'Preferences', 'Delivery log', 'Audit'];
+  static const tabs = ['Rules', 'Templates & wording', 'Channels on/off', 'Preferences', 'Delivery log', 'Audit'];
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
         length: tabs.length,
+        initialIndex: initialTab,
         child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text(
+                '$organizationName: turn channels on or off in "Channels on/off"; change this organization\'s wording '
+                'in "Templates & wording" (Override); choose who hears about each event in "Rules".',
+                key: const ValueKey('workspace-help'),
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
           TabBar(isScrollable: true, tabs: [for (final t in tabs) Tab(text: t)]),
           Expanded(
             child: TabBarView(children: [

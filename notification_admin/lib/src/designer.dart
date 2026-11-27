@@ -50,6 +50,53 @@ String smsInfo(String text) {
   return '$n characters · $seg SMS segment${seg > 1 ? 's' : ''}';
 }
 
+/// Variable paths used in [text] (`{{path}}` or `{{path | formatter}}`).
+Iterable<String> templatePaths(String text) =>
+    RegExp(r'{{\s*([\w.\[\]]+)').allMatches(text).map((m) => m.group(1)!);
+
+/// [data] with an example value for every path in [paths] that it does not have yet, so the preview shows
+/// realistic text instead of "missing" for the variables the template already uses.
+Map<String, dynamic> withSampleValues(Map<String, dynamic> data, Iterable<String> paths) {
+  const examples = {
+    'subject': 'Water tank cleaning tomorrow',
+    'title': 'Water tank cleaning tomorrow',
+    'body': 'Block A tank cleaning is scheduled for 10 AM. Water supply will be off for 2 hours.',
+    'name': 'Anita Rao',
+    'amount': 12500,
+    'flat': 'B-402',
+    'reference': 'RC-2291',
+  };
+  final out = jsonDecode(jsonEncode(data)) as Map<String, dynamic>;
+  for (final path in paths) {
+    final keys = path.split('.');
+    Map<String, dynamic> node = out;
+    for (var i = 0; i < keys.length - 1; i++) {
+      final next = node[keys[i]];
+      if (next is! Map<String, dynamic>) {
+        if (next != null) break;
+        node[keys[i]] = <String, dynamic>{};
+      }
+      node = node[keys[i]] as Map<String, dynamic>;
+    }
+    node.putIfAbsent(keys.last, () => examples[keys.last] ?? 'Sample ${keys.last.replaceAll('_', ' ')}');
+  }
+  return out;
+}
+
+/// Look of each channel in the designer (same colours as the Notification Center).
+class ChannelStyle {
+  final IconData icon;
+  final Color color;
+  const ChannelStyle(this.icon, this.color);
+}
+
+const channelStyles = {
+  'IN_APP': ChannelStyle(Icons.notifications_outlined, Color(0xFF9C4DCC)),
+  'SMS': ChannelStyle(Icons.sms_outlined, Color(0xFF2E7D32)),
+  'WHATSAPP': ChannelStyle(Icons.chat_outlined, Color(0xFF128C7E)),
+  'PUSH': ChannelStyle(Icons.phone_iphone, Color(0xFFEF6C00)),
+};
+
 /// Fields each channel's content has, in the order the designer shows them.
 const channelFields = {
   'IN_APP': ['title', 'body'],
@@ -138,7 +185,22 @@ class TemplateDesignerState extends State<TemplateDesigner> {
       _fill({});
       if (mounted) toast(context, errorText(e));
     }
+    _addSampleValues();
     if (mounted) setState(() => loading = false);
+  }
+
+  /// Gives the sample data a value for every variable the template already uses (on any channel),
+  /// so the preview does not report the template's own variables as missing.
+  void _addSampleValues() {
+    try {
+      final data = Map<String, dynamic>.from(jsonDecode(sample.text) as Map);
+      final used = <String>{
+        for (final c in kChannels) ...templatePaths(jsonEncode(_contentOf(c) ?? {})),
+        ...templatePaths(jsonEncode(base)),
+      };
+      final next = withSampleValues(data, used);
+      if (jsonEncode(next) != jsonEncode(data)) sample.text = const JsonEncoder.withIndent('  ').convert(next);
+    } catch (_) {}
   }
 
   void _fill(Json content) {
@@ -237,9 +299,131 @@ class TemplateDesignerState extends State<TemplateDesigner> {
     await load();
   }
 
+  /// Content of [ch] the designer would open with (draft, else latest published), for the channel cards.
+  Json? _contentOf(String ch) {
+    if (ch == channel) return content();
+    final rows = versions.where((v) => v['channel'] == ch && v['status'] != 'RETIRED').toList()
+      ..sort((a, b) => (b['version'] as int).compareTo(a['version'] as int));
+    return rows.isEmpty ? null : Map<String, dynamic>.from(rows.first['content'] as Map? ?? {});
+  }
+
+  String _stateOf(String ch) {
+    if (widget.isOverride) return ch == channel ? (current != null ? 'Org override' : 'Platform') : '';
+    final rows = versions.where((v) => v['channel'] == ch).toList();
+    if (rows.any((v) => v['status'] == 'DRAFT')) return 'Draft';
+    final pub = rows.where((v) => v['status'] == 'PUBLISHED').map((v) => v['version'] as int).toList()..sort();
+    return pub.isEmpty ? 'Not set' : 'v${pub.last} published';
+  }
+
+  void _select(String ch) {
+    if (ch == channel) return;
+    channel = ch;
+    load();
+  }
+
+  static const _label = TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.8, color: Color(0xFF64748B));
+
+  Widget _header(BuildContext context, List<String> vars) {
+    final theme = Theme.of(context);
+    final code = '${widget.template['code'] ?? 'Template'}';
+    final active = [for (final c in kChannels) if ((_contentOf(c) ?? {}).isNotEmpty) c];
+    final (badge, badgeColor, explain) = widget.isOverride
+        ? current != null
+            ? ('ORG OVERRIDE', const Color(0xFFCA8A04), 'This organization has its own wording on v${widget.baseVersion}. Only changed fields are stored.')
+            : ('PLATFORM v${widget.baseVersion}', const Color(0xFF16A34A), 'Showing the platform template. Publish an override to change it for this organization only.')
+        : versions.any((v) => v['status'] == 'DRAFT')
+            ? ('DRAFT', const Color(0xFF1A56DB), 'Editing the platform template. Saving updates the draft; publishing sets the version new organizations start on.')
+            : ('PLATFORM TEMPLATE', const Color(0xFF16A34A), 'Editing the platform template. Saving updates the draft; publishing sets the version new organizations start on.');
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.description_outlined, size: 16, color: theme.colorScheme.primary),
+          const SizedBox(width: 8),
+          Expanded(child: Text('$code  ·  Notification template', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700))),
+          _Badge(badge, badgeColor, key: const ValueKey('designer-badge')),
+        ]),
+        const SizedBox(height: 6),
+        Text(explain, style: theme.textTheme.bodySmall?.copyWith(color: badgeColor)),
+        const SizedBox(height: 10),
+        Row(children: [
+          Text('Active channels:', style: theme.textTheme.bodySmall),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Wrap(spacing: 6, runSpacing: 4, children: [
+              if (active.isEmpty) Text('None yet', style: theme.textTheme.bodySmall),
+              for (final c in active) _Badge(chLabel(c).toUpperCase(), channelStyles[c]!.color),
+            ]),
+          ),
+          Text('${vars.length} variables available', style: theme.textTheme.bodySmall),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _channelCard(BuildContext context, String ch) {
+    final st = channelStyles[ch]!, on = ch == channel, hasContent = (_contentOf(ch) ?? {}).isNotEmpty;
+    final theme = Theme.of(context);
+    final state = _stateOf(ch);
+    return Expanded(
+      child: InkWell(
+        key: ValueKey('channel-$ch'),
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => _select(ch),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+          decoration: BoxDecoration(
+            color: on ? st.color.withAlpha(24) : theme.colorScheme.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: on ? st.color : theme.colorScheme.outlineVariant, width: on ? 1.6 : 1.1),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Icon(st.icon, size: 16, color: on ? st.color : theme.colorScheme.onSurfaceVariant),
+              const SizedBox(width: 6),
+              Expanded(child: Text(chLabel(ch), style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700))),
+              if (state.isNotEmpty) Text(state, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            ]),
+            const SizedBox(height: 6),
+            Row(children: [
+              Icon(hasContent ? Icons.check_circle_outline : Icons.radio_button_unchecked,
+                  size: 12, color: hasContent ? const Color(0xFF16A34A) : theme.colorScheme.outline),
+              const SizedBox(width: 4),
+              Text(hasContent ? 'Content set' : 'No content',
+                  style: TextStyle(fontSize: 10.5, color: hasContent ? const Color(0xFF16A34A) : theme.colorScheme.outline)),
+              const Spacer(),
+              Icon(on ? Icons.edit : Icons.edit_outlined, size: 13, color: on ? st.color : theme.colorScheme.outline),
+              const SizedBox(width: 2),
+              Text(on ? 'Editing' : 'Edit', style: TextStyle(fontSize: 11, color: on ? st.color : theme.colorScheme.outline)),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  String _fieldLabel(String f) => const {
+        'title': 'Title',
+        'body': 'Message body',
+        'route': 'Open screen (route)',
+        'msg91_template_id': 'MSG91 template ID',
+        'dlt_template_id': 'DLT template ID',
+        'template_name': 'WhatsApp template name (approved in Meta)',
+        'language': 'Language (e.g. en)',
+        'params': 'Template parameters (JSON list, in order)',
+      }[f] ??
+      f;
+
   @override
   Widget build(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
+    final st = channelStyles[channel]!;
     Map<String, dynamic> data;
     String? sampleError;
     try {
@@ -248,93 +432,268 @@ class TemplateDesignerState extends State<TemplateDesigner> {
       data = {};
       sampleError = 'Sample data is not valid JSON';
     }
-    final previewTitle = renderPreview(controllers['title']?.text ?? '', data);
-    final previewBody = renderPreview(controllers['body']?.text ?? controllers['params']?.text ?? '', data);
+    final fields = channelFields[channel]!;
+    String text(String f) => fields.contains(f) ? controllers[f]?.text ?? '' : '';
+    final previewTitle = renderPreview(text('title'), data);
+    final previewBody = renderPreview(fields.contains('body') ? text('body') : text('params'), data);
     final missing = {...previewTitle.missing, ...previewBody.missing};
-    final vars = variables.isNotEmpty
-        ? variables.map((v) => v['path'] as String).toList()
-        : ['recipient.name', 'data.amount', 'data.reference', 'data.flat'];
+    final used = <String>{for (final c in kChannels) ...templatePaths(jsonEncode(_contentOf(c) ?? {}))};
+    final vars = <String>{
+      if (variables.isNotEmpty) ...variables.map((v) => v['path'] as String) else ...['recipient.name', 'data.amount', 'data.reference', 'data.flat'],
+      ...used,
+    }.toList();
 
-    final editor = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      for (final f in channelFields[channel]!)
-        Focus(
-          onFocusChange: (has) {
-            if (has) focused = controllers[f];
-          },
-          child: TextField(
-            key: ValueKey('field-$f'),
-            controller: controllers[f],
-            maxLines: f == 'body' || f == 'params' ? 4 : 1,
-            decoration: InputDecoration(labelText: f),
-            onChanged: (_) => setState(() {}),
+    final editor = Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: st.color.withAlpha(90)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(st.icon, color: st.color, size: 18),
+          const SizedBox(width: 8),
+          Text('${chLabel(channel)} content', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+          if (widget.isOverride && current != null) ...[
+            const SizedBox(width: 8),
+            statusChip('Override v${current!['version']} published', color: Colors.orange),
+          ],
+        ]),
+        const Divider(height: 20),
+        for (final f in channelFields[channel]!) ...[
+          if (f == 'body' || f == 'params') ...[
+            Text(f == 'body' ? 'BODY' : 'PARAMETERS', style: _label),
+            const SizedBox(height: 6),
+          ],
+          Focus(
+            onFocusChange: (has) {
+              if (has) focused = controllers[f];
+            },
+            child: TextField(
+              key: ValueKey('field-$f'),
+              controller: controllers[f],
+              maxLines: f == 'body' || f == 'params' ? 6 : 1,
+              decoration: f == 'body' || f == 'params'
+                  ? InputDecoration(
+                      hintText: f == 'body' ? 'Message body…' : '["{{recipient.name}}", "{{data.amount}}"]',
+                      filled: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: st.color, width: 1.6)),
+                    )
+                  : InputDecoration(
+                      labelText: _fieldLabel(f),
+                      focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: st.color, width: 1.6)),
+                    ),
+              onChanged: (_) => setState(() {}),
+            ),
           ),
-        ),
-      if (channel == 'SMS') Padding(padding: const EdgeInsets.only(top: 4), child: Text(smsInfo(previewBody.text), key: const ValueKey('sms-info'))),
-      const SizedBox(height: 8),
-      const Text('Insert variable'),
-      Wrap(spacing: 6, runSpacing: 6, children: [
-        for (final v in vars) ActionChip(key: ValueKey('var-$v'), label: Text('{{$v}}'), onPressed: () => insertVariable(v)),
+          const SizedBox(height: 10),
+        ],
+        if (channel == 'SMS')
+          Text(smsInfo(previewBody.text), key: const ValueKey('sms-info'), style: Theme.of(context).textTheme.bodySmall),
+        const SizedBox(height: 6),
+        const Text('INSERT VARIABLE', style: _label),
+        const SizedBox(height: 8),
+        Wrap(spacing: 6, runSpacing: 6, children: [
+          for (final v in vars)
+            ActionChip(
+              key: ValueKey('var-$v'),
+              label: Text('{{$v}}', style: TextStyle(color: st.color, fontSize: 12)),
+              side: BorderSide(color: st.color.withAlpha(90)),
+              visualDensity: VisualDensity.compact,
+              onPressed: () => insertVariable(v),
+            ),
+        ]),
+        const SizedBox(height: 16),
+        Row(children: widget.isOverride
+            ? [
+                if (current != null) ...[
+                  OutlinedButton.icon(onPressed: busy ? null : resetOverride, icon: const Icon(Icons.restore, size: 16), label: const Text('Reset to platform')),
+                  const SizedBox(width: 8),
+                ],
+                FilledButton.icon(onPressed: busy ? null : publishOverride, icon: const Icon(Icons.publish, size: 16), label: const Text('Publish override')),
+              ]
+            : [
+                OutlinedButton.icon(onPressed: busy ? null : saveDraft, icon: const Icon(Icons.save_outlined, size: 16), label: const Text('Save draft')),
+                const SizedBox(width: 8),
+                FilledButton.icon(onPressed: busy ? null : publish, icon: const Icon(Icons.publish, size: 16), label: const Text('Publish')),
+              ]),
       ]),
-      const SizedBox(height: 12),
-      Wrap(spacing: 8, children: widget.isOverride
-          ? [
-              if (current != null) OutlinedButton(onPressed: busy ? null : resetOverride, child: const Text('Reset to platform')),
-              FilledButton(onPressed: busy ? null : publishOverride, child: const Text('Publish override')),
-            ]
-          : [
-              OutlinedButton(onPressed: busy ? null : saveDraft, child: const Text('Save draft')),
-              FilledButton(onPressed: busy ? null : publish, child: const Text('Publish')),
-            ]),
-    ]);
+    );
 
     final preview = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('Live preview · sample data'),
-      Card(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            if (previewTitle.text.isNotEmpty) Text(previewTitle.text, key: const ValueKey('preview-title'), style: const TextStyle(fontWeight: FontWeight.w600)),
-            Text(previewBody.text, key: const ValueKey('preview-body')),
-          ]),
-        ),
+      const Text('LIVE PREVIEW', style: _label),
+      const SizedBox(height: 8),
+      Center(
+        child: ChannelPreview(
+            channel: channel,
+            title: previewTitle.text,
+            body: previewBody.text,
+            extra: channel == 'WHATSAPP' ? text('template_name') : text('route')),
       ),
+      const SizedBox(height: 8),
       if (sampleError != null) Text(sampleError, style: const TextStyle(color: Colors.red)),
-      if (missing.isEmpty && sampleError == null) const Text('All variables resolve', key: ValueKey('vars-ok')),
+      if (missing.isEmpty && sampleError == null)
+        const Row(children: [
+          Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF16A34A)),
+          SizedBox(width: 4),
+          Text('All variables resolve', key: ValueKey('vars-ok'), style: TextStyle(color: Color(0xFF16A34A))),
+        ]),
       if (missing.isNotEmpty) Text('Missing: ${missing.join(', ')}', key: const ValueKey('vars-missing'), style: const TextStyle(color: Colors.red)),
-      TextField(
-          key: const ValueKey('sample'),
-          controller: sample,
-          maxLines: 6,
-          decoration: const InputDecoration(labelText: 'Sample data (from the event schema)'),
-          onChanged: (_) => setState(() {})),
+      const SizedBox(height: 12),
+      ExpansionTile(
+        key: const ValueKey('sample-tile'),
+        tilePadding: EdgeInsets.zero,
+        initiallyExpanded: sampleError != null,
+        title: const Text('SAMPLE DATA', style: _label),
+        subtitle: const Text('Edit to try other values; nothing here is saved.'),
+        children: [
+          TextField(
+              key: const ValueKey('sample'),
+              controller: sample,
+              maxLines: 8,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              decoration: InputDecoration(border: OutlineInputBorder(borderRadius: BorderRadius.circular(8))),
+              onChanged: (_) => setState(() {})),
+        ],
+      ),
     ]);
 
     return ListView(padding: const EdgeInsets.all(16), children: [
-      Text(
-          widget.isOverride
-              ? 'Override for this organization on v${widget.baseVersion}. Only changed fields are stored; the rest follows the platform version.'
-              : 'Editing the platform template. Saving updates the draft; publishing sets the version new organizations start on.',
-          style: Theme.of(context).textTheme.bodySmall),
+      _header(context, vars),
+      const SizedBox(height: 14),
+      const Text('CHANNELS', style: _label),
       const SizedBox(height: 8),
-      SegmentedButton<String>(
-        segments: [for (final c in kChannels) ButtonSegment(value: c, label: Text(chLabel(c)))],
-        selected: {channel},
-        onSelectionChanged: (s) {
-          channel = s.first;
-          load();
-        },
-      ),
-      if (widget.isOverride && current != null)
-        Padding(padding: const EdgeInsets.only(top: 8), child: statusChip('Override v${current!['version']} published', color: Colors.orange)),
-      const SizedBox(height: 12),
+      Row(children: [
+        for (final c in kChannels) ...[
+          _channelCard(context, c),
+          if (c != kChannels.last) const SizedBox(width: 8),
+        ],
+      ]),
+      const SizedBox(height: 16),
       LayoutBuilder(
-          builder: (context, c) => c.maxWidth > 760
+          builder: (context, c) => c.maxWidth > 820
               ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Expanded(child: editor),
-                  const SizedBox(width: 16),
-                  Expanded(child: preview),
+                  Expanded(flex: 3, child: editor),
+                  const SizedBox(width: 20),
+                  Expanded(flex: 2, child: preview),
                 ])
-              : Column(children: [editor, const SizedBox(height: 16), preview])),
+              : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [editor, const SizedBox(height: 16), preview])),
     ]);
+  }
+}
+
+class _Badge extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _Badge(this.label, this.color, {super.key});
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: color.withAlpha(30),
+          borderRadius: BorderRadius.circular(5),
+          border: Border.all(color: color.withAlpha(160)),
+        ),
+        child: Text(label, style: TextStyle(color: color, fontSize: 9.5, fontWeight: FontWeight.w800, letterSpacing: 0.6)),
+      );
+}
+
+/// A phone-style preview of one channel's message: an in-app notification card, an SMS bubble,
+/// a WhatsApp chat bubble or a lock-screen push banner.
+class ChannelPreview extends StatelessWidget {
+  final String channel, title, body, extra;
+  const ChannelPreview({super.key, required this.channel, required this.title, required this.body, this.extra = ''});
+
+  @override
+  Widget build(BuildContext context) {
+    final (bg, bar, barText) = switch (channel) {
+      'WHATSAPP' => (const Color(0xFFECE5DD), const Color(0xFF075E54), 'Society office'),
+      'SMS' => (Colors.white, const Color(0xFFF1F3F4), 'AX-SOCIETY'),
+      'PUSH' => (const Color(0xFF1F2A44), Colors.transparent, ''),
+      _ => (const Color(0xFFF5F6FA), const Color(0xFF1A56DB), 'Notifications'),
+    };
+    final titleW = title.isEmpty ? null : Text(title, key: const ValueKey('preview-title'), style: const TextStyle(fontWeight: FontWeight.w700));
+    final bodyW = Text(body, key: const ValueKey('preview-body'));
+    Widget message = switch (channel) {
+      'SMS' => Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            decoration: const BoxDecoration(
+                color: Color(0xFFE9E9EB),
+                borderRadius: BorderRadius.only(topLeft: Radius.circular(16), topRight: Radius.circular(16), bottomRight: Radius.circular(16), bottomLeft: Radius.circular(4))),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [if (titleW != null) titleW, bodyW]),
+          )),
+      'WHATSAPP' => Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: const [BoxShadow(color: Color(0x22000000), blurRadius: 2, offset: Offset(0, 1))]),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (extra.isNotEmpty) Text(extra, style: const TextStyle(fontSize: 11, color: Color(0xFF128C7E), fontWeight: FontWeight.w600)),
+              if (titleW != null) titleW,
+              bodyW,
+              const Align(alignment: Alignment.centerRight, child: Text('10:24 ✓✓', style: TextStyle(fontSize: 10, color: Color(0xFF34B7F1)))),
+            ]),
+          )),
+      'PUSH' => Container(
+          margin: const EdgeInsets.fromLTRB(10, 28, 10, 10),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(color: Colors.white.withAlpha(235), borderRadius: BorderRadius.circular(14)),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(width: 28, height: 28, decoration: BoxDecoration(color: const Color(0xFF1A56DB), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.apartment, color: Colors.white, size: 16)),
+            const SizedBox(width: 8),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('SOCIETY · now', style: TextStyle(fontSize: 10, color: Colors.black54)),
+              if (titleW != null) titleW,
+              bodyW,
+              if (extra.isNotEmpty) Text('Opens $extra', style: const TextStyle(fontSize: 10, color: Colors.black45)),
+            ])),
+          ]),
+        ),
+      _ => Container(
+          margin: const EdgeInsets.all(10),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFE2E8F0))),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const CircleAvatar(radius: 14, backgroundColor: Color(0xFFEDE7F6), child: Icon(Icons.notifications, size: 16, color: Color(0xFF9C4DCC))),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (titleW != null) titleW,
+              bodyW,
+              const SizedBox(height: 4),
+              const Text('just now', style: TextStyle(fontSize: 10, color: Colors.black45)),
+            ])),
+            Container(width: 8, height: 8, margin: const EdgeInsets.only(top: 4), decoration: const BoxDecoration(color: Color(0xFF1A56DB), shape: BoxShape.circle)),
+          ]),
+        ),
+    };
+    return Container(
+      key: ValueKey('preview-$channel'),
+      width: 320,
+      constraints: const BoxConstraints(minHeight: 260),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: const Color(0xFF111827), width: 6),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: DefaultTextStyle.merge(
+        style: TextStyle(color: channel == 'PUSH' ? Colors.black87 : const Color(0xFF111827), fontSize: 13),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+          if (barText.isNotEmpty)
+            Container(
+              color: bar,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Text(barText, style: TextStyle(color: bar == const Color(0xFFF1F3F4) ? Colors.black87 : Colors.white, fontWeight: FontWeight.w600)),
+            ),
+          if (channel == 'PUSH') const Padding(padding: EdgeInsets.only(top: 18), child: Center(child: Text('10:24', style: TextStyle(color: Colors.white, fontSize: 34, fontWeight: FontWeight.w300)))),
+          message,
+        ]),
+      ),
+    );
   }
 }

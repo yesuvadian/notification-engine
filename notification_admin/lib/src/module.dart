@@ -70,8 +70,8 @@ class NotificationAdminModule {
   }
 
   /// The "Notifications" tab inside the console's organization workspace.
-  Widget organizationTab(String organizationId, String organizationName) => OrganizationWorkspace(
-      api: api, productCode: productCode, organizationId: organizationId, organizationName: organizationName);
+  Widget organizationTab(String organizationId, String organizationName, {int initialTab = 0}) => OrganizationWorkspace(
+      api: api, productCode: productCode, organizationId: organizationId, organizationName: organizationName, initialTab: initialTab);
 
   /// Small card for the console overview: organizations, products, queue backlog and dead letters.
   Widget overviewCard() => NotificationOverviewCard(api: api);

@@ -498,9 +498,60 @@ void main() {
       await t.enterText(find.byKey(const ValueKey('field-body')), 'Hi {{data.unknown}}');
       await t.pump();
       expect(find.text('Missing: data.unknown'), findsOneWidget);
+      await t.tap(find.byKey(const ValueKey('sample-tile')));
+      await t.pumpAndSettle();
       await t.enterText(find.byKey(const ValueKey('sample')), '{bad');
       await t.pump();
       expect(find.text('Sample data is not valid JSON'), findsOneWidget);
+    });
+
+    testWidgets("the template's own variables get sample values, so nothing is reported missing", (t) async {
+      await big(t);
+      final cmm = {
+        'id': 't9',
+        'code': 'cmm_message',
+        'versions': [
+          {'version': 1, 'channel': 'IN_APP', 'status': 'PUBLISHED', 'content': {'title': '{{data.subject}}', 'body': '{{data.body}}'}},
+        ],
+      };
+      await t.pumpWidget(host(TemplateDesigner.platform(api: platformFor(FakeEngine({})), template: cmm)));
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('vars-ok')), findsOneWidget);
+      expect(find.byKey(const ValueKey('vars-missing')), findsNothing);
+      expect(find.text('Water tank cleaning tomorrow'), findsOneWidget);
+      expect(find.byKey(const ValueKey('var-data.subject')), findsOneWidget);
+      expect(find.byKey(const ValueKey('preview-IN_APP')), findsOneWidget);
+      expect(find.text('v1 published'), findsOneWidget);
+      expect(find.text('Content set'), findsOneWidget);
+      expect(find.text('No content'), findsNWidgets(3));
+    });
+
+    testWidgets('channel cards switch the editor and the phone preview', (t) async {
+      await big(t);
+      await t.pumpWidget(host(TemplateDesigner.platform(api: platformFor(FakeEngine({})), template: tpl())));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const ValueKey('channel-WHATSAPP')));
+      await t.pumpAndSettle();
+      expect(find.text('WhatsApp content'), findsOneWidget);
+      expect(find.byKey(const ValueKey('preview-WHATSAPP')), findsOneWidget);
+      await t.enterText(find.byKey(const ValueKey('field-template_name')), 'rent_reminder');
+      await t.enterText(find.byKey(const ValueKey('field-params')), '["{{data.flat}}"]');
+      await t.pump();
+      expect(find.text('rent_reminder'), findsWidgets);
+      expect(find.text('["B-402"]'), findsOneWidget);
+      await t.tap(find.byKey(const ValueKey('channel-PUSH')));
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('preview-PUSH')), findsOneWidget);
+      expect(find.byKey(const ValueKey('field-route')), findsOneWidget);
+    });
+
+    test('withSampleValues fills only what is missing', () {
+      final d = withSampleValues({'data': {'amount': 5}}, ['data.amount', 'data.subject', 'recipient.name', 'data.ticket_no']);
+      expect(d['data']['amount'], 5);
+      expect(d['data']['subject'], 'Water tank cleaning tomorrow');
+      expect(d['recipient']['name'], 'Anita Rao');
+      expect(d['data']['ticket_no'], 'Sample ticket no');
+      expect(templatePaths('Hi {{ recipient.name }} {{data.amount | number}}').toList(), ['recipient.name', 'data.amount']);
     });
 
     testWidgets('SMS shows the segment count', (t) async {
