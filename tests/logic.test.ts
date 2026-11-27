@@ -1,6 +1,6 @@
 // deno test tests/logic.test.ts
 import { assert, assertEquals, assertThrows } from 'jsr:@std/assert@1';
-import { applyMappings, backoffSeconds, contextRecipients, eligible, eventVariables, matchesConditions, productVariableReport, renderContent, schemaFields, variableIssues } from '../supabase/functions/notification/logic.ts';
+import { applyMappings, backoffSeconds, contextRecipients, eligible, eventVariables, matchesConditions, productVariableReport, renderContent, roleFields, ruleRoleCodes, schemaFields, variableIssues } from '../supabase/functions/notification/logic.ts';
 import { decodeCursor, encodeCursor, mapDbError, DbError, safeEqual, normalizePath } from '../supabase/functions/notification/http.ts';
 
 Deno.test('backoff grows, is capped and honours Retry-After', () => {
@@ -107,4 +107,26 @@ Deno.test('productVariableReport: events per variable, platform match, missing d
     { event: 'A v2', name: 'due', type: 'string', expected: null },
     { event: 'A v2', name: 'body', type: 'number', expected: 'string' }
   ]);
+});
+
+Deno.test('a rule can name several roles; older one-role rules keep working', () => {
+  assertEquals(ruleRoleCodes({ role_codes: ['admin', 'treasurer', 'admin'], role_code: 'admin' }), ['admin', 'treasurer']);
+  assertEquals(ruleRoleCodes({ role_codes: [], role_code: 'manager' }), ['manager']);
+  assertEquals(ruleRoleCodes({ role_code: 'manager' }), ['manager']);
+  assertEquals(ruleRoleCodes({ role_codes: null, role_code: null }), []);
+  assertEquals(ruleRoleCodes({ role_codes: ['', 5, 'x'] }), ['x']);
+});
+
+Deno.test('rule bodies: role_codes wins, role_code alone is a one-role list, bad input is refused', () => {
+  assertEquals(roleFields({ role_codes: [' a ', 'b', 'a'] }), { role_code: 'a', role_codes: ['a', 'b'] });
+  assertEquals(roleFields({ role_codes: [] }), { role_code: null, role_codes: [] });
+  assertEquals(roleFields({ role_code: 'm' }), { role_code: 'm', role_codes: ['m'] });
+  assertEquals(roleFields({ role_code: null }), { role_code: null, role_codes: [] });
+  assertEquals(roleFields({ role_codes: ['x'], role_code: 'y' }), { role_code: 'x', role_codes: ['x'] });
+  assertEquals(roleFields({ purpose: 'p' }), null);
+  assertThrows(() => roleFields({ role_codes: 'a' }));
+  assertThrows(() => roleFields({ role_codes: [1] }));
+  assertThrows(() => roleFields({ role_codes: [''] }));
+  assertThrows(() => roleFields({ role_codes: Array.from({ length: 21 }, (_, i) => `r${i}`) }));
+  assertThrows(() => roleFields({ role_code: 7 }));
 });

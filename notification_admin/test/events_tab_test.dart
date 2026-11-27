@@ -15,12 +15,13 @@ const tpls = [
   {'template_id': 'msg', 'version': 1, 'channel': 'IN_APP', 'locale': 'en', 'status': 'PUBLISHED', 'template': {'code': 'cmm_message', 'name': 'CMM message'}},
 ];
 
-Map<String, dynamic> dueRule({String strategy = 'RECIPIENTS', String? role, bool active = true}) => {
+Map<String, dynamic> dueRule({String strategy = 'RECIPIENTS', String? role, List<String>? roles, bool active = true}) => {
       'id': 'r1',
       'event_code': 'UPKEEP_TASK_DUE',
       'event_version': 2,
       'recipient_strategy': strategy,
-      'role_code': role,
+      'role_code': role ?? roles?.first,
+      if (roles != null) 'role_codes': roles,
       'purpose': 'upkeep_task_due',
       'active': active,
     };
@@ -108,30 +109,57 @@ void main() {
     expect(f.hits('DELETE /v1/admin/overrides/ov1'), hasLength(1));
   });
 
-  testWidgets('recipients: choosing a role shows a dropdown of the product roles by name', (t) async {
+  testWidgets('recipients: choosing "Everyone with a role" starts with the first product role by name', (t) async {
     final f = await pumpTab(t, engine());
     await t.tap(find.byKey(const ValueKey('who-r1')));
     await t.pumpAndSettle();
     await t.tap(find.text('Everyone with a role').last);
     await t.pumpAndSettle();
     // First selectable role by name (Organization Admin), not the system or inactive role.
-    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'recipient_strategy': 'ALL_USERS_IN_ROLE', 'role_code': 'role-uuid-admin'});
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {
+      'recipient_strategy': 'ALL_USERS_IN_ROLE',
+      'role_codes': ['role-uuid-admin'],
+    });
   });
 
-  testWidgets('role dropdown lists only active product roles and saves the code', (t) async {
+  testWidgets('several roles can be ticked; only active product roles are offered', (t) async {
     final f = await pumpTab(t, engine(rules: [dueRule(strategy: 'ALL_USERS_IN_ROLE', role: 'role-uuid-admin')]));
-    await t.tap(find.byKey(const ValueKey('role-r1')));
+    expect(find.text('Roles (members of any of them)'), findsOneWidget);
+    expect(find.byKey(const ValueKey('role-r1-cmm_notification_admin')), findsNothing);
+    expect(find.byKey(const ValueKey('role-r1-old')), findsNothing);
+    expect(t.widget<FilterChip>(find.byKey(const ValueKey('role-r1-role-uuid-admin'))).selected, isTrue);
+    await t.tap(find.byKey(const ValueKey('role-r1-role-uuid-treasurer')));
     await t.pumpAndSettle();
-    expect(find.text('CMM notifications'), findsNothing);
-    expect(find.text('Old role'), findsNothing);
-    await t.tap(find.text('Treasurer').last);
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {
+      'role_codes': ['role-uuid-admin', 'role-uuid-treasurer'],
+    });
+  });
+
+  testWidgets('a rule with several roles shows them all, and unticking one keeps the rest', (t) async {
+    await big(t);
+    final f = engine(rules: [dueRule(strategy: 'ALL_USERS_IN_ROLE', roles: ['role-uuid-treasurer', 'role-uuid-admin'])]);
+    await t.pumpWidget(host(EventsTab(org: cmmOrg(f), organizationName: 'Hittop')));
     await t.pumpAndSettle();
-    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'role_code': 'role-uuid-treasurer'});
+    final summary = find.byKey(const ValueKey('event-summary-UPKEEP_TASK_DUE'));
+    expect(find.descendant(of: summary, matching: find.text('Treasurer, Organization Admin')), findsOneWidget);
+    await t.tap(find.text('Upkeep task due'));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const ValueKey('role-r1-role-uuid-treasurer')));
+    await t.pumpAndSettle();
+    expect(f.bodies('PUT /v1/admin/rules/r1').single, {'role_codes': ['role-uuid-admin']});
+  });
+
+  testWidgets('the last role cannot be unticked', (t) async {
+    final f = await pumpTab(t, engine(rules: [dueRule(strategy: 'ALL_USERS_IN_ROLE', role: 'role-uuid-admin')]));
+    await t.tap(find.byKey(const ValueKey('role-r1-role-uuid-admin')));
+    await t.pumpAndSettle();
+    expect(f.hits('PUT /v1/admin/rules/r1'), isEmpty);
+    expect(find.textContaining('Keep at least one role'), findsOneWidget);
   });
 
   testWidgets('a removed role is flagged on the rule', (t) async {
-    await pumpTab(t, engine(rules: [dueRule(strategy: 'ALL_USERS_IN_ROLE', role: 'gone')]));
-    expect(find.text('Role gone no longer exists'), findsOneWidget);
+    await pumpTab(t, engine(rules: [dueRule(strategy: 'ALL_USERS_IN_ROLE', roles: ['role-uuid-admin', 'gone'])]));
+    expect(find.text('No longer a role here: gone'), findsOneWidget);
   });
 
   testWidgets('Decided by the product explains that the product picks the people', (t) async {

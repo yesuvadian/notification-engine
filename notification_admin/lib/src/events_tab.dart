@@ -82,6 +82,17 @@ class EventsData {
     return code ?? '?';
   }
 
+  /// The roles of an "Everyone with a role" rule: role_codes, else the older single role_code.
+  static List<String> ruleRoles(Json rule) {
+    final many = [
+      for (final c in (rule['role_codes'] as List? ?? const []))
+        if (c is String && c.isNotEmpty) c,
+    ];
+    if (many.isNotEmpty) return many.toSet().toList();
+    final one = rule['role_code'];
+    return one is String && one.isNotEmpty ? [one] : const [];
+  }
+
   List<Json> get selectableRoles => roles.where((r) => r['active'] != false && r['notification_admin'] != true).toList()
     ..sort((a, b) => '${a['name']}'.compareTo('${b['name']}'));
 }
@@ -216,7 +227,7 @@ class _EventCard extends StatelessWidget {
     if (rule == null) return [Text('Not set up', style: Theme.of(context).textTheme.bodySmall)];
     final strategy = rule['recipient_strategy'];
     final who = strategy == 'ALL_USERS_IN_ROLE'
-        ? data.roleName(rule['role_code'] as String?)
+        ? EventsData.ruleRoles(rule).map(data.roleName).join(', ')
         : strategy == 'ALL_ORG_USERS'
             ? 'Everyone'
             : 'Decided by $pc';
@@ -367,8 +378,15 @@ class _WhoGetsIt extends StatelessWidget {
     final pc = (org.productCode ?? 'the product').toUpperCase();
     final strategy = rule['recipient_strategy'] as String? ?? 'RECIPIENTS';
     final roles = data.selectableRoles;
-    final role = rule['role_code'] as String?;
-    final known = roles.any((r) => r['code'] == role);
+    final chosen = EventsData.ruleRoles(rule);
+    final known = [for (final c in chosen) if (roles.any((r) => r['code'] == c)) c];
+    final gone = [for (final c in chosen) if (!known.contains(c)) c];
+    Future<void> setRoles(List<String> codes) async {
+      if (codes.isEmpty) return toast(context, 'Keep at least one role, or choose another kind of recipient');
+      final sorted = [...codes]..sort();
+      if (await runAction(context, () => org.updateRule(id, {'role_codes': sorted}), done: 'Roles saved')) await reload();
+    }
+
     return Wrap(spacing: 16, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.end, children: [
       SizedBox(
         width: 340,
@@ -385,24 +403,32 @@ class _WhoGetsIt extends StatelessWidget {
           onChanged: (v) async {
             if (v == null || v == strategy) return;
             if (v == 'ALL_USERS_IN_ROLE' && roles.isEmpty) return toast(context, '$pc has not shared any roles for this organization yet');
-            final patch = {'recipient_strategy': v, if (v == 'ALL_USERS_IN_ROLE') 'role_code': known ? role : roles.first['code']};
+            final patch = {
+              'recipient_strategy': v,
+              if (v == 'ALL_USERS_IN_ROLE') 'role_codes': known.isNotEmpty ? known : [roles.first['code']],
+            };
             if (await runAction(context, () => org.updateRule(id, patch), done: 'Recipients saved')) await reload();
           },
         ),
       ),
       if (strategy == 'ALL_USERS_IN_ROLE')
-        SizedBox(
-          width: 280,
-          child: DropdownButtonFormField<String>(
-            key: ValueKey('role-$id'),
-            isExpanded: true,
-            initialValue: known ? role : null,
-            decoration: InputDecoration(labelText: 'Role', helperText: known || role == null ? null : 'Role $role no longer exists'),
-            items: [for (final r in roles) DropdownMenuItem(value: r['code'] as String, child: Text('${r['name'] ?? r['code']}'))],
-            onChanged: (v) async {
-              if (v == null || v == role) return;
-              if (await runAction(context, () => org.updateRule(id, {'role_code': v}), done: 'Role saved')) await reload();
-            },
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: InputDecorator(
+            key: ValueKey('roles-$id'),
+            decoration: InputDecoration(
+              labelText: 'Roles (members of any of them)',
+              helperText: gone.isEmpty ? null : 'No longer a role here: ${gone.join(', ')}',
+            ),
+            child: Wrap(spacing: 8, runSpacing: 6, children: [
+              for (final r in roles)
+                FilterChip(
+                  key: ValueKey('role-$id-${r['code']}'),
+                  label: Text('${r['name'] ?? r['code']}'),
+                  selected: known.contains(r['code']),
+                  onSelected: (on) => setRoles(on ? [...known, r['code'] as String] : [...known]..remove(r['code'])),
+                ),
+            ]),
           ),
         ),
       if (strategy == 'RECIPIENTS')

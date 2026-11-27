@@ -62,6 +62,11 @@ s,b,_=call('POST','/admin/rules',P,{'event_code':'APPROVED','recipient_strategy'
 rid=b.get('id') if isinstance(b,dict) else None
 s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'active':True,'priority':5},org=ORG); check('A rule update',s==200 and b['active'] is True and b['priority']==5,(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'active':'yes'},org=ORG); check('A rule update bad type 422',s==422,(s,b))
+# Several roles ("Everyone with a role"): role_codes, checked against the organization's roles.
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_codes':['manager','ntfadmin','manager']},org=ORG); check('A rule several roles',s==200 and b.get('role_codes')==['manager','ntfadmin'] and b.get('role_code')=='manager',(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_codes':['manager','no-such-role']},org=ORG); check('A rule unknown role 422',s==422 and b.get('error')=='unknown_role',(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_codes':'manager'},org=ORG); check('A rule role_codes not a list 422',s==422,(s,b))
+s,b,_=call('PUT','/admin/rules/%s'%rid,P,{'role_code':'manager'},org=ORG); check('A rule single role_code still works',s==200 and b.get('role_codes')==['manager'],(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%uuid.uuid4(),P,{'active':True},org=ORG); check('A rule update unknown 404',s==404,(s,b))
 s,b,_=call('PUT','/admin/rules/%s'%rid,U,{'active':True},org=ORG); check('A rule update by user 403',s==403,(s,b))
 TPL='40000000-0000-0000-0000-000000000001'

@@ -152,12 +152,12 @@ void main() {
       expect(find.text('No rules yet'), findsOneWidget);
       await t.tap(find.byKey(const ValueKey('rule-new')));
       await t.pumpAndSettle();
-      await t.enterText(find.byKey(const ValueKey('rule-role')), 'TENANT');
+      await t.enterText(find.byKey(const ValueKey('rule-role')), 'TENANT, OWNER ,');
       await tapText(t, 'Create');
       expect(f.bodies('POST /v1/admin/rules').single, {
         'event_code': 'RENT_DUE',
         'recipient_strategy': 'ALL_USERS_IN_ROLE',
-        'role_code': 'TENANT',
+        'role_codes': ['TENANT', 'OWNER'],
         'purpose': 'TRANSACTIONAL',
         'active': false,
       });
@@ -179,6 +179,7 @@ void main() {
       final b = f.bodies('POST /v1/admin/rules').single;
       expect(b['recipient_strategy'], 'ALL_ORG_USERS');
       expect(b.containsKey('role_code'), isFalse);
+      expect(b.containsKey('role_codes'), isFalse);
     });
 
     testWidgets('cannot turn a rule on without a channel', (t) async {

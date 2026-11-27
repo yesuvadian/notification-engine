@@ -33,6 +33,35 @@ export function contextRecipients(strategy: string, payload: Record<string, unkn
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length <= 200) : [];
 }
 
+/** The roles an ALL_USERS_IN_ROLE rule notifies: role_codes, else the older single role_code. */
+export function ruleRoleCodes(rule: { role_codes?: unknown; role_code?: unknown }): string[] {
+  const many = Array.isArray(rule.role_codes) ? rule.role_codes.filter((c): c is string => typeof c === 'string' && c.length > 0) : [];
+  if (many.length) return [...new Set(many)];
+  return typeof rule.role_code === 'string' && rule.role_code ? [rule.role_code] : [];
+}
+
+/**
+ * The role fields of a rule create/update body. role_codes (a list) wins over role_code; role_code alone is
+ * kept working as a one-role list. Returns null when the body names no roles. Throws a message on bad input.
+ */
+export function roleFields(b: Record<string, unknown>): { role_code: string | null; role_codes: string[] } | null {
+  if ('role_codes' in b) {
+    const v = b.role_codes;
+    if (!Array.isArray(v) || v.length > 20 || v.some((c) => typeof c !== 'string' || !c.trim() || c.length > 100)) {
+      throw new Error('role_codes must be a list of up to 20 role codes');
+    }
+    const codes = [...new Set(v.map((c) => (c as string).trim()))];
+    return { role_code: codes[0] ?? null, role_codes: codes };
+  }
+  if ('role_code' in b) {
+    const c = b.role_code;
+    if (c !== null && (typeof c !== 'string' || !c.trim() || c.length > 100)) throw new Error('role_code must be a role code');
+    const code = typeof c === 'string' ? c.trim() : null;
+    return { role_code: code, role_codes: code ? [code] : [] };
+  }
+  return null;
+}
+
 export interface Preference { enabled: boolean; consent_at: string | null }
 
 /** In-app needs no consent; external channels need an enabled channel plus recorded consent. */

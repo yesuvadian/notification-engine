@@ -276,7 +276,10 @@ class RulesTab extends StatelessWidget {
               onChanged: (v) => set(() => strategy = v!),
             ),
             if (strategy == 'ALL_USERS_IN_ROLE')
-              TextField(key: const ValueKey('rule-role'), controller: role, decoration: const InputDecoration(labelText: 'Role code')),
+              TextField(
+                  key: const ValueKey('rule-role'),
+                  controller: role,
+                  decoration: const InputDecoration(labelText: 'Role codes', helperText: 'One or more, separated by commas')),
             TextField(key: const ValueKey('rule-purpose'), controller: purpose, decoration: const InputDecoration(labelText: 'Purpose')),
           ]),
           actions: [
@@ -292,7 +295,8 @@ class RulesTab extends StatelessWidget {
         () => org.createRule({
               'event_code': event,
               'recipient_strategy': strategy,
-              if (strategy == 'ALL_USERS_IN_ROLE' && role.text.trim().isNotEmpty) 'role_code': role.text.trim(),
+              if (strategy == 'ALL_USERS_IN_ROLE' && role.text.trim().isNotEmpty)
+                'role_codes': [for (final c in role.text.split(',')) if (c.trim().isNotEmpty) c.trim()],
               'purpose': purpose.text.trim(),
               'active': false,
             }),
@@ -313,7 +317,10 @@ class _RuleCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bindings = data.bindings.where((b) => b['rule_id'] == id).toList();
-    final who = rule['recipient_strategy'] == 'ALL_USERS_IN_ROLE' ? 'Role ${rule['role_code'] ?? '?'}' : rule['recipient_strategy'];
+    final roles = EventsData.ruleRoles(rule);
+    final who = rule['recipient_strategy'] == 'ALL_USERS_IN_ROLE'
+        ? '${roles.length == 1 ? 'Role' : 'Roles'} ${roles.isEmpty ? '?' : roles.join(', ')}'
+        : rule['recipient_strategy'];
     return Card(
       key: ValueKey('rule-$id'),
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),

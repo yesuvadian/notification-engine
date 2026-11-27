@@ -8,7 +8,7 @@ import { merge } from './parser.mjs';
 import { audit, db, q } from './db.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel, SendResult } from './adapters/types.ts';
-import { applyMappings, backoffSeconds, contextRecipients, eligible, matchesConditions, Preference, renderContent } from './logic.ts';
+import { applyMappings, backoffSeconds, contextRecipients, eligible, matchesConditions, Preference, renderContent, ruleRoleCodes } from './logic.ts';
 
 const EVENT_VT = 120;
 const DELIVERY_VT = 90;
@@ -52,7 +52,10 @@ async function expandEvent(eventId: string, tenantId: string): Promise<{ enqueue
     if (!matchesConditions(r.conditions, e.payload)) continue;
     let ids: string[];
     if (r.recipient_strategy === 'ALL_USERS_IN_ROLE') {
-      ids = (await q(db.from('ntf_user_roles').select('user_id').eq('tenant_id', t.id).eq('role_code', r.role_code))).map((x: Row) => x.user_id);
+      const codes = ruleRoleCodes(r);
+      ids = codes.length
+        ? (await q(db.from('ntf_user_roles').select('user_id').eq('tenant_id', t.id).in('role_code', codes))).map((x: Row) => x.user_id)
+        : [];
     } else if (r.recipient_strategy === 'ALL_ORG_USERS') {
       ids = (await q(db.from('ntf_users').select('user_id').eq('tenant_id', t.id).eq('active', true).limit(10000))).map((x: Row) => x.user_id);
     } else {

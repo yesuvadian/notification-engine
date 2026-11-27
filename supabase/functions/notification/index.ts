@@ -11,7 +11,7 @@ import { runWorker } from './worker.ts';
 import { platform } from './platform.ts';
 import { adapterFor } from './adapters/index.ts';
 import { Channel } from './adapters/types.ts';
-import { eventVariables, jsonEqual, VARIABLE_NAME_RE, VARIABLE_TYPES, VariableDef, variableIssues } from './logic.ts';
+import { eventVariables, jsonEqual, roleFields, VARIABLE_NAME_RE, VARIABLE_TYPES, VariableDef, variableIssues } from './logic.ts';
 
 const VERSION = '0.2.0';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -98,6 +98,22 @@ async function exchangeToken(p: Principal, b: Body, cid: string) {
   }));
   await audit({ tenantId: p.tenantId, productId: p.productId, actor: p.actor, action: 'auth.exchange', details: { userId, scope, ttl }, correlationId: cid });
   return json({ accessToken: token, tokenType: 'Bearer', scope, expiresAt }, 200, cid);
+}
+
+/** role_code / role_codes from a rule body, each checked against the organization's roles; null when not given. */
+async function ruleRoles(tenantId: string, b: Body) {
+  let f: { role_code: string | null; role_codes: string[] } | null;
+  try {
+    f = roleFields(b);
+  } catch (e) {
+    throw new ApiError(422, 'invalid_request', (e as Error).message);
+  }
+  if (f && f.role_codes.length) {
+    const found: Body[] = await q(db.from('ntf_roles').select('code').eq('tenant_id', tenantId).in('code', f.role_codes));
+    const missing = f.role_codes.filter((c) => !found.some((r) => r.code === c));
+    if (missing.length) throw new ApiError(422, 'unknown_role', `Not a role of this organization: ${missing.join(', ')}`);
+  }
+  return f;
 }
 
 async function syncUsers(p: Principal, b: Body, cid: string) {
@@ -401,7 +417,10 @@ async function adminItem(p: Principal, req: Request, seg: string[], b: Body, cid
       return json({ ok: true }, 200, cid);
     }
     const patch: Body = {};
-    for (const k of ['active', 'conditions', 'recipient_strategy', 'role_code', 'priority', 'purpose', 'schedule_config']) if (k in b) patch[k] = b[k];
+    for (const k of ['active', 'conditions', 'recipient_strategy', 'priority', 'purpose', 'schedule_config']) if (k in b) patch[k] = b[k];
+    // One or several roles ("Everyone with a role"): role_codes, or the older single role_code.
+    const roles = await ruleRoles(p.tenantId, b);
+    if (roles) Object.assign(patch, roles);
     if ('active' in patch && typeof patch.active !== 'boolean') throw new ApiError(422, 'invalid_request', 'active must be boolean');
     // Moving a rule to a newer event version keeps its channels, pinned templates and overrides.
     if ('event_version' in b) {
@@ -605,7 +624,8 @@ async function admin(p: Principal, req: Request, path: string, b: Body, cid: str
     const row = {
       tenant_id: p.tenantId, product_id: p.productId, event_code: requireString(b.event_code, 'event_code', 100),
       event_version: b.event_version ?? 1, active: b.active === true, conditions: b.conditions ?? {},
-      recipient_strategy: requireString(b.recipient_strategy, 'recipient_strategy', 100), role_code: b.role_code ?? null,
+      recipient_strategy: requireString(b.recipient_strategy, 'recipient_strategy', 100),
+      ...((await ruleRoles(p.tenantId, b)) ?? { role_code: null, role_codes: [] }),
       priority: Number.isInteger(b.priority) ? b.priority : 0, purpose: requireString(b.purpose, 'purpose', 100)
     };
     const saved = await q(db.from('ntf_rules').insert(row).select().single());
