@@ -57,10 +57,24 @@ void main() {
     ], bindings: [
       {'rule_id': 'r1', 'channel': 'IN_APP', 'template_id': 'due', 'template_version': 1},
       {'rule_id': 'r1', 'channel': 'SMS', 'template_id': 'due', 'template_version': 1},
-    ], rules: [ev.dueRule(strategy: 'ALL_USERS_IN_ROLE', role: 'role-uuid-admin')]);
+      {'rule_id': 'r2', 'channel': 'IN_APP', 'template_id': 'msg', 'template_version': 1},
+      {'rule_id': 'r3', 'channel': 'IN_APP', 'template_id': 'msg', 'template_version': 1},
+    ], rules: [
+      ev.dueRule(strategy: 'ALL_USERS_IN_ROLE', role: 'role-uuid-admin'),
+      {'id': 'r2', 'event_code': 'UPKEEP_TASK_DONE', 'event_version': 2, 'recipient_strategy': 'RECIPIENTS', 'active': true},
+      {'id': 'r3', 'event_code': 'VISITOR_OVERSTAY', 'event_version': 2, 'recipient_strategy': 'ALL_USERS_IN_ROLE', 'role_code': 'role-uuid-treasurer', 'active': false},
+    ]);
+    f.routes['GET /v1/admin/events'] = (_) => [
+          for (final c in ['UPKEEP_TASK_DUE', 'UPKEEP_TASK_OVERDUE', 'UPKEEP_TASK_DONE', 'UPKEEP_TASK_CHECK', 'UPKEEP_TASK_SENT_BACK'])
+            {'code': c, 'version': 2, 'module_code': 'UPKEEP'},
+          for (final c in ['VISITOR_BLOCKED', 'VISITOR_OVERSTAY']) {'code': c, 'version': 2, 'module_code': 'VISITORS'},
+        ];
     await t.pumpWidget(app(OrganizationWorkspace(api: platformFor(f), productCode: 'cmm', organizationId: 'soc1', organizationName: 'Hittop'), k));
     await t.pumpAndSettle();
-    await shot(t, k, '1-notifications-tab');
+    await shot(t, k, '3-grouped-collapsed');
+    await t.tap(find.text('Upkeep task due'));
+    await t.pumpAndSettle();
+    await shot(t, k, '4-one-event-open');
 
     f.routes['GET /v1/admin/templates/due/effective'] = (_) => {
           'master': {'content': {'title': 'Upkeep due · {{data.reference}}', 'body': '{{data.task_title}} at {{data.place}} is due {{data.due_date}}.'}},
@@ -76,6 +90,6 @@ void main() {
         };
     await t.tap(find.byKey(const ValueKey('wording-UPKEEP_TASK_DUE-IN_APP')));
     await t.pumpAndSettle();
-    await shot(t, k, '2-wording-editor');
+    await shot(t, k, '5-wording-editor');
   }, skip: Platform.environment['SHOTS'] != '1');
 }

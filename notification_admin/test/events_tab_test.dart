@@ -39,9 +39,9 @@ FakeEngine engine({
       'GET /v1/admin/rules': (_) => rules ?? [dueRule()],
       'GET /v1/admin/rule-channels': (_) => bindings ?? [{'rule_id': 'r1', 'channel': 'IN_APP', 'template_id': 'due', 'template_version': 1}],
       'GET /v1/admin/events': (_) => [
-            {'code': 'UPKEEP_TASK_DUE', 'version': 1},
-            {'code': 'UPKEEP_TASK_DUE', 'version': 2},
-            {'code': 'VISITOR_BLOCKED', 'version': 2},
+            {'code': 'UPKEEP_TASK_DUE', 'version': 1, 'module_code': 'UPKEEP'},
+            {'code': 'UPKEEP_TASK_DUE', 'version': 2, 'module_code': 'UPKEEP'},
+            {'code': 'VISITOR_BLOCKED', 'version': 2, 'module_code': 'VISITORS'},
           ],
       'GET /v1/admin/templates': (_) => tpls,
       'GET /v1/admin/channels': (_) => channels,
@@ -63,7 +63,7 @@ FakeEngine engine({
 
 Future<FakeEngine> pumpTab(WidgetTester t, FakeEngine f) async {
   await big(t);
-  await t.pumpWidget(host(EventsTab(org: cmmOrg(f), organizationName: 'Hittop')));
+  await t.pumpWidget(host(EventsTab(org: cmmOrg(f), organizationName: 'Hittop', expandEvents: true)));
   await t.pumpAndSettle();
   return f;
 }
@@ -80,7 +80,7 @@ void main() {
     expect(find.text('Visitor blocked'), findsOneWidget);
     expect(find.byKey(const ValueKey('event-setup-VISITOR_BLOCKED')), findsOneWidget);
     expect(find.byKey(const ValueKey('event-active-UPKEEP_TASK_DUE')), findsOneWidget);
-    expect(find.text('Not set up: nobody in this organization gets this notification.'), findsOneWidget);
+    expect(find.text('Not set up'), findsOneWidget);
   });
 
   testWidgets('platform wording and organization wording sit side by side, the one in use is marked', (t) async {
@@ -207,5 +207,42 @@ void main() {
     await t.pumpAndSettle();
     expect(OrganizationWorkspace.tabs.first, 'Notifications');
     expect(find.byKey(const ValueKey('event-UPKEEP_TASK_DUE')), findsOneWidget);
+  });
+
+  testWidgets('events are grouped by area; cards start collapsed with a one-line summary', (t) async {
+    await big(t);
+    final f = engine(overrides: [
+      {'id': 'ov1', 'template_id': 'due', 'channel': 'IN_APP', 'status': 'PUBLISHED', 'version': 3},
+    ], rules: [dueRule(strategy: 'ALL_USERS_IN_ROLE', role: 'role-uuid-treasurer')]);
+    await t.pumpWidget(host(EventsTab(org: cmmOrg(f), organizationName: 'Hittop')));
+    await t.pumpAndSettle();
+    expect(find.text('Upkeep'), findsOneWidget);
+    expect(find.text('Visitors'), findsOneWidget);
+    expect(find.text('1 event · 1 on'), findsOneWidget);
+    expect(find.text('1 event · 0 on'), findsOneWidget);
+    final summary = find.byKey(const ValueKey('event-summary-UPKEEP_TASK_DUE'));
+    expect(find.descendant(of: summary, matching: find.text('Treasurer')), findsOneWidget);
+    expect(find.descendant(of: summary, matching: find.text('IN-APP')), findsOneWidget);
+    expect(find.descendant(of: summary, matching: find.text('ORG WORDING')), findsOneWidget);
+    // Collapsed: channel rows are not shown until the card is opened.
+    expect(find.byKey(const ValueKey('platform-UPKEEP_TASK_DUE-IN_APP')).hitTestable(), findsNothing);
+    await t.tap(find.text('Upkeep task due'));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('platform-UPKEEP_TASK_DUE-IN_APP')).hitTestable(), findsOneWidget);
+    // Collapsing a whole area hides its events.
+    await t.tap(find.text('Visitors'));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('event-setup-VISITOR_BLOCKED')).hitTestable(), findsNothing);
+  });
+
+  testWidgets('summary shows platform wording and the product deciding recipients by default', (t) async {
+    await big(t);
+    final f = engine();
+    await t.pumpWidget(host(EventsTab(org: cmmOrg(f), organizationName: 'Hittop')));
+    await t.pumpAndSettle();
+    final summary = find.byKey(const ValueKey('event-summary-UPKEEP_TASK_DUE'));
+    expect(find.descendant(of: summary, matching: find.text('Decided by CMM')), findsOneWidget);
+    expect(find.descendant(of: summary, matching: find.text('PLATFORM WORDING')), findsOneWidget);
+    expect(find.descendant(of: find.byKey(const ValueKey('event-summary-VISITOR_BLOCKED')), matching: find.text('Not set up')), findsOneWidget);
   });
 }

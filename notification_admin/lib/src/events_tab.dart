@@ -65,6 +65,23 @@ class EventsData {
         options.first;
   }
 
+  /// Events grouped by the product's module (e.g. UPKEEP, VISITORS), groups and events sorted.
+  Map<String, List<String>> get groups {
+    final out = <String, List<String>>{};
+    for (final code in events) {
+      final m = d.events.firstWhere((e) => e['code'] == code)['module_code']?.toString() ?? '';
+      (out[m.isEmpty ? 'OTHER' : m] ??= []).add(code);
+    }
+    return Map.fromEntries(out.entries.toList()..sort((a, b) => a.key.compareTo(b.key)));
+  }
+
+  String roleName(String? code) {
+    for (final r in roles) {
+      if (r['code'] == code) return '${r['name'] ?? code}';
+    }
+    return code ?? '?';
+  }
+
   List<Json> get selectableRoles => roles.where((r) => r['active'] != false && r['notification_admin'] != true).toList()
     ..sort((a, b) => '${a['name']}'.compareTo('${b['name']}'));
 }
@@ -83,7 +100,10 @@ Future<EventsData> loadEvents(NotificationApi org) async {
 class EventsTab extends StatelessWidget {
   final NotificationApi org;
   final String organizationName;
-  const EventsTab({super.key, required this.org, required this.organizationName});
+
+  /// Open every event card (tests and screenshots); by default cards start collapsed.
+  final bool expandEvents;
+  const EventsTab({super.key, required this.org, required this.organizationName, this.expandEvents = false});
 
   @override
   Widget build(BuildContext context) => Loaded<EventsData>(
@@ -92,7 +112,7 @@ class EventsTab extends StatelessWidget {
           final pc = (org.productCode ?? '').toUpperCase();
           return ListView(children: [
             PageHeader('Notifications',
-                subtitle: 'One card per $pc event. Choose who gets it, turn channels on, and change the wording. '
+                subtitle: '$pc events grouped by area; open an event to change it. Choose who gets it, turn channels on, and change the wording. '
                     'Platform wording is shared by every organization; organization wording changes it for $organizationName only.',
                 actions: [
                   if (setupPlan(e.d, org.productCode ?? '').values.where((v) => v != null).length > 1)
@@ -110,11 +130,44 @@ class EventsTab extends StatelessWidget {
                 ]),
             const _Legend(),
             if (e.events.isEmpty) const ListTile(title: Text('This product has not registered any events yet')),
-            for (final ev in e.events) _EventCard(org: org, event: ev, data: e, reload: reload),
+            for (final MapEntry(key: module, value: codes) in e.groups.entries)
+              _Group(
+                  module: module,
+                  codes: codes,
+                  data: e,
+                  children: [
+                    for (final ev in codes) _EventCard(org: org, event: ev, data: e, reload: reload, expanded: expandEvents),
+                  ]),
             const SizedBox(height: 24),
           ]);
         },
       );
+}
+
+/// One area of the product (its module), open by default, with how many of its events are on.
+class _Group extends StatelessWidget {
+  final String module;
+  final List<String> codes;
+  final EventsData data;
+  final List<Widget> children;
+  const _Group({required this.module, required this.codes, required this.data, required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    final on = codes.where((c) => data.rulesFor(c).firstOrNull?['active'] == true).length;
+    return ExpansionTile(
+      key: PageStorageKey('group-$module'),
+      initiallyExpanded: true,
+      maintainState: true,
+      shape: const Border(),
+      collapsedShape: const Border(),
+      tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+      childrenPadding: EdgeInsets.zero,
+      title: Text(eventLabel(module), key: ValueKey('group-title-$module'), style: Theme.of(context).textTheme.titleMedium),
+      subtitle: Text('${codes.length} event${codes.length == 1 ? '' : 's'} · $on on', style: Theme.of(context).textTheme.bodySmall),
+      children: children,
+    );
+  }
 }
 
 class _Legend extends StatelessWidget {
@@ -153,9 +206,36 @@ class _EventCard extends StatelessWidget {
   final String event;
   final EventsData data;
   final Future<void> Function() reload;
-  const _EventCard({required this.org, required this.event, required this.data, required this.reload});
+  final bool expanded;
+  const _EventCard({required this.org, required this.event, required this.data, required this.reload, this.expanded = false});
 
   String get pc => (org.productCode ?? '').toUpperCase();
+
+  /// One line for the collapsed card: who gets it, channels on, and where the wording comes from.
+  List<Widget> _summary(BuildContext context, Json? rule) {
+    if (rule == null) return [Text('Not set up', style: Theme.of(context).textTheme.bodySmall)];
+    final strategy = rule['recipient_strategy'];
+    final who = strategy == 'ALL_USERS_IN_ROLE'
+        ? data.roleName(rule['role_code'] as String?)
+        : strategy == 'ALL_ORG_USERS'
+            ? 'Everyone'
+            : 'Decided by $pc';
+    final bound = data.d.bindings.where((b) => b['rule_id'] == rule['id']).toList()
+      ..sort((a, b) => kChannels.indexOf(a['channel'] as String) - kChannels.indexOf(b['channel'] as String));
+    final own = bound.where((b) => data.override(b['template_id'] as String, b['channel'] as String) != null).length;
+    return [
+      Row(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.group_outlined, size: 14),
+        const SizedBox(width: 4),
+        Text(who, style: Theme.of(context).textTheme.bodySmall),
+      ]),
+      if (bound.isEmpty) Text('No channel', style: Theme.of(context).textTheme.bodySmall),
+      for (final b in bound)
+        _Tag(chLabel(b['channel'] as String).toUpperCase(), channelStyles[b['channel']]!.color),
+      if (bound.isNotEmpty)
+        own == 0 ? const _Tag('PLATFORM WORDING', kPlatformColor) : _Tag(own == bound.length ? 'ORG WORDING' : 'ORG WORDING ON $own', kOrgColor),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -163,55 +243,71 @@ class _EventCard extends StatelessWidget {
     final rules = data.rulesFor(event);
     final rule = rules.firstOrNull;
     final on = rule?['active'] == true;
-    return Card(
-      key: ValueKey('event-$event'),
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+    final header = Row(children: [
+      Expanded(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(eventLabel(event), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
-                Text(event, style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace')),
-              ]),
-            ),
-            if (rule == null)
-              FilledButton.icon(
-                  key: ValueKey('event-setup-$event'),
-                  onPressed: () => _setUp(context),
-                  icon: const Icon(Icons.power_settings_new, size: 16),
-                  label: const Text('Set up'))
-            else ...[
-              Text(on ? 'On' : 'Off', style: theme.textTheme.labelLarge),
-              Switch(key: ValueKey('event-active-$event'), value: on, onChanged: (v) => _setActive(context, rule, v)),
-              PopupMenuButton<String>(
-                key: ValueKey('event-menu-$event'),
-                onSelected: (_) => _delete(context, rule),
-                itemBuilder: (_) => const [PopupMenuItem(value: 'delete', child: Text('Remove this setup'))],
-              ),
-            ],
+            Flexible(child: Text(eventLabel(event), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
+            const SizedBox(width: 8),
+            Text(event, style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace', color: theme.colorScheme.outline)),
           ]),
-          if (rule == null)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text('Not set up: nobody in this organization gets this notification.', style: theme.textTheme.bodySmall),
-            )
-          else ...[
-            const SizedBox(height: 10),
-            _section(context, '1', 'Who gets it'),
-            _WhoGetsIt(org: org, rule: rule, data: data, reload: reload),
-            if (rules.length > 1)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('${rules.length - 1} more rule(s) for this event are not shown here.', style: theme.textTheme.bodySmall),
-              ),
-            const SizedBox(height: 12),
-            _section(context, '2', 'Channels and wording'),
-            for (final c in data.d.channels.map((c) => c['channel'] as String).toList()..sort((a, b) => kChannels.indexOf(a) - kChannels.indexOf(b)))
-              _ChannelRow(org: org, event: event, rule: rule, channel: c, data: data, reload: reload),
-          ],
+          const SizedBox(height: 4),
+          Wrap(key: ValueKey('event-summary-$event'), spacing: 10, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: _summary(context, rule)),
         ]),
+      ),
+      if (rule == null)
+        FilledButton.icon(
+            key: ValueKey('event-setup-$event'),
+            onPressed: () => _setUp(context),
+            icon: const Icon(Icons.power_settings_new, size: 16),
+            label: const Text('Set up'))
+      else ...[
+        Text(on ? 'On' : 'Off', style: theme.textTheme.labelLarge),
+        Switch(key: ValueKey('event-active-$event'), value: on, onChanged: (v) => _setActive(context, rule, v)),
+        PopupMenuButton<String>(
+          key: ValueKey('event-menu-$event'),
+          onSelected: (_) => _delete(context, rule),
+          itemBuilder: (_) => const [PopupMenuItem(value: 'delete', child: Text('Remove this setup'))],
+        ),
+      ],
+    ]);
+    if (rule == null) {
+      return Card(
+        key: ValueKey('event-$event'),
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: Padding(padding: const EdgeInsets.fromLTRB(16, 10, 12, 10), child: header),
+      );
+    }
+    return Card(
+      key: ValueKey('event-$event'),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        key: PageStorageKey('event-tile-$event'),
+        initiallyExpanded: expanded,
+        maintainState: true,
+        shape: const Border(),
+        collapsedShape: const Border(),
+        tilePadding: const EdgeInsets.fromLTRB(16, 4, 12, 4),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 12, 12),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        controlAffinity: ListTileControlAffinity.leading,
+        title: header,
+        children: [
+          const Divider(height: 1),
+          const SizedBox(height: 10),
+          _section(context, '1', 'Who gets it'),
+          _WhoGetsIt(org: org, rule: rule, data: data, reload: reload),
+          if (rules.length > 1)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('${rules.length - 1} more rule(s) for this event are not shown here.', style: theme.textTheme.bodySmall),
+            ),
+          const SizedBox(height: 12),
+          _section(context, '2', 'Channels and wording'),
+          for (final c in data.d.channels.map((c) => c['channel'] as String).toList()..sort((a, b) => kChannels.indexOf(a) - kChannels.indexOf(b)))
+            _ChannelRow(org: org, event: event, rule: rule, channel: c, data: data, reload: reload),
+        ],
       ),
     );
   }
